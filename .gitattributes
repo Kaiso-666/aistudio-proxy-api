@@ -1,0 +1,79 @@
+# Enforce LF line endings for all text files (cross-platform consistency)
+* text=auto eol=lf
+
+# =============================================================================
+# TRANSLATION FORK MERGE STRATEGY
+# =============================================================================
+# This is an English translation fork of a Chinese upstream repository.
+# The README.md will always conflict because:
+#   - Fork: English README (intentional localization)
+#   - Upstream: Chinese README
+#
+# The 'merge=ours' strategy tells Git to always keep our (fork's) version
+# during merges. This serves as additional protection alongside the workflow
+# conflict handling in .github/workflows/upstream-sync.yml
+# =============================================================================
+README.md merge=ours
+
+# Binary files (no line ending conversion)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pyc binary
+*.pyd binary
+*.so binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Python files (explicit LF)
+*.py text eol=lf
+*.pyi text eol=lf
+*.pyx text eol=lf
+
+# Configuration files
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.conf text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+.env* text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows scripts (keep CRLF for Windows)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# JavaScript/TypeScript
+*.js text eol=lf
+*.ts text eol=lf
+*.jsx text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.scss text eol=lf
+*.html text eol=lf
+
+# Lock files
+poetry.lock text eol=lf
+package-lock.json text eol=lf

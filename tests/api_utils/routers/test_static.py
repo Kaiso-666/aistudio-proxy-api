@@ -1,0 +1,208 @@
+"""
+High-quality tests for api_utils/routers/static.py - Static file serving.
+
+Focus: Test static file endpoints with both success and error paths.
+Strategy: Mock Path.exists() to control file existence, test actual routing logic.
+"""
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+from fastapi import HTTPException
+
+
+class TestReadIndex:
+    """Tests for read_index endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_read_index_react_exists(self):
+        """
+        Test scenario: React index.html exists
+        Expected: Return FileResponse with React index.html
+        """
+        from api_utils.routers.static import read_index
+
+        mock_logger = MagicMock()
+
+        with patch.object(Path, "exists", return_value=True):
+            response = await read_index(logger=mock_logger)
+
+            assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_read_index_not_built(self):
+        """
+        Test scenario: React build does not exist
+        Expected: Return 503 error (Service Unavailable)
+        """
+        from api_utils.routers.static import read_index
+
+        mock_logger = MagicMock()
+
+        with patch.object(Path, "exists", return_value=False):
+            with pytest.raises(HTTPException) as exc_info:
+                await read_index(logger=mock_logger)
+
+            assert exc_info.value.status_code == 503
+            assert "Frontend not built" in exc_info.value.detail
+            mock_logger.error.assert_called_once()
+
+
+class TestServeReactAssets:
+    """Tests for serve_react_assets endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_serve_react_assets_js(self):
+        """
+        Test scenario: JS asset exists
+        Expected: Return FileResponse with application/javascript media type
+        """
+        from api_utils.routers.static import serve_react_assets
+
+        mock_logger = MagicMock()
+
+        with patch.object(Path, "exists", return_value=True):
+            response = await serve_react_assets("main.js", logger=mock_logger)
+
+            assert response is not None
+            assert response.media_type == "application/javascript"
+
+    @pytest.mark.asyncio
+    async def test_serve_react_assets_css(self):
+        """
+        Test scenario: CSS asset exists
+        Expected: Return FileResponse with text/css media type
+        """
+        from api_utils.routers.static import serve_react_assets
+
+        mock_logger = MagicMock()
+
+        with patch.object(Path, "exists", return_value=True):
+            response = await serve_react_assets("style.css", logger=mock_logger)
+
+            assert response is not None
+            assert response.media_type == "text/css"
+
+    @pytest.mark.asyncio
+    async def test_serve_react_assets_map(self):
+        """
+        Test scenario: Source map asset exists
+        Expected: Return FileResponse with application/json media type
+        """
+        from api_utils.routers.static import serve_react_assets
+
+        mock_logger = MagicMock()
+
+        with patch.object(Path, "exists", return_value=True):
+            response = await serve_react_assets("main.js.map", logger=mock_logger)
+
+            assert response is not None
+            assert response.media_type == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_serve_react_assets_not_found(self):
+        """
+        Test scenario: Asset not found
+        Expected: Return 404 error
+        """
+        from api_utils.routers.static import serve_react_assets
+
+        mock_logger = MagicMock()
+
+        with patch.object(Path, "exists", return_value=False):
+            with pytest.raises(HTTPException) as exc_info:
+                await serve_react_assets("missing.js", logger=mock_logger)
+
+            assert exc_info.value.status_code == 404
+            assert "missing.js" in exc_info.value.detail
+            mock_logger.debug.assert_called_once()
+
+
+class TestGetStaticFilesApp:
+    """Tests for get_static_files_app factory function."""
+
+    def test_get_static_files_app_exists(self):
+        """
+        Test scenario: Assets directory exists
+        Expected: Return StaticFiles instance
+        """
+        from api_utils.routers.static import get_static_files_app
+
+        with (
+            patch("api_utils.routers.static.Path.exists", return_value=True),
+            patch("os.path.isdir", return_value=True),
+        ):
+            result = get_static_files_app()
+            assert result is not None
+
+    def test_get_static_files_app_not_exists(self):
+        """
+        Test scenario: Assets directory does not exist
+        Expected: Return None
+        """
+        from api_utils.routers.static import get_static_files_app
+
+        with patch.object(Path, "exists", return_value=False):
+            result = get_static_files_app()
+
+            assert result is None
+
+
+class TestDirectoryTraversalProtection:
+    """Tests for directory traversal attack prevention."""
+
+    @pytest.mark.asyncio
+    async def test_serve_react_assets_traversal_blocked(self):
+        """
+        Test scenario: Attempt directory traversal attack
+        Expected: Return 403 error
+        """
+        from api_utils.routers.static import serve_react_assets
+
+        mock_logger = MagicMock()
+
+        # First mock: file exists, second mock for resolve().relative_to() failure
+        with patch.object(Path, "exists", return_value=True):
+            # When the resolved path is outside assets dir, relative_to raises ValueError
+            with patch.object(Path, "resolve") as mock_resolve:
+                mock_resolved = MagicMock()
+                mock_resolved.relative_to.side_effect = ValueError(
+                    "Not a relative path"
+                )
+                mock_resolve.return_value = mock_resolved
+
+                with pytest.raises(HTTPException) as exc_info:
+                    await serve_react_assets("../../../etc/passwd", logger=mock_logger)
+
+                assert exc_info.value.status_code == 403
+                assert "Access denied" in exc_info.value.detail
+                mock_logger.warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_serve_react_assets_additional_mime_types(self):
+        """
+        Test scenario: Additional MIME type support
+        Expected: Correctly identify more file types
+        """
+        from api_utils.routers.static import serve_react_assets
+
+        mock_logger = MagicMock()
+
+        test_cases = [
+            ("image.svg", "image/svg+xml"),
+            ("image.png", "image/png"),
+            ("font.woff2", "font/woff2"),
+        ]
+
+        for filename, expected_media_type in test_cases:
+            with patch.object(Path, "exists", return_value=True):
+                with patch.object(Path, "resolve") as mock_resolve:
+                    mock_resolved = MagicMock()
+                    mock_resolved.relative_to.return_value = Path(filename)
+                    mock_resolve.return_value = mock_resolved
+
+                    response = await serve_react_assets(filename, logger=mock_logger)
+
+                    assert response is not None
+                    assert response.media_type == expected_media_type
