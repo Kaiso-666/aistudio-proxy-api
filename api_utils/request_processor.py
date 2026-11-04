@@ -814,6 +814,18 @@ async def _process_request_refactored(
         resolution = chat_sessions.resolve(
             req_id, request.messages, session_model, session_tools
         )
+
+        # A turn that answers a tool call must not continue the native
+        # function-call turn: AI Studio keeps that turn open behind its
+        # "Enter function response" widget, and continuing it makes the model
+        # re-issue the identical call. A fresh chat with the call and its
+        # result written as text is deterministic.
+        last_message = request.messages[-1] if request.messages else None
+        if getattr(last_message, "role", None) == "tool":
+            resolution = chat_sessions.force_tool_replay(
+                resolution, request.messages
+            )
+
         if resolution.needs_clear and chat_sessions.page_dirty():
             await page_controller.clear_chat_history(check_client_disconnected)
             chat_sessions.set_page_dirty(False)
@@ -930,9 +942,23 @@ async def _process_request_refactored(
         check_client_disconnected("Final check before submitting prompt")
 
         with log_context("Execution", context["logger"], silent=True):
-            await page_controller.submit_prompt(
-                prepared_prompt, attachments_list, check_client_disconnected
-            )
+            answered_pending_call = False
+            last_message = resolution.messages[-1] if resolution.messages else None
+            if getattr(last_message, "role", None) == "tool":
+                tool_text = last_message.content
+                if isinstance(tool_text, str) and tool_text.strip():
+                    # A native call left open by the previous turn is answered in
+                    # place; otherwise the model never sees the result and just
+                    # re-issues the same call.
+                    answered_pending_call = (
+                        await page_controller.submit_function_response(
+                            tool_text, check_client_disconnected
+                        )
+                    )
+            if not answered_pending_call:
+                await page_controller.submit_prompt(
+                    prepared_prompt, attachments_list, check_client_disconnected
+                )
 
         # The turn is in flight. It is committed to the session only once the
         # worker confirms the response was fully captured; see queue_worker.

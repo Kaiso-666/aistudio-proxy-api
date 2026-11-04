@@ -13,9 +13,6 @@ from playwright.async_api import Page as AsyncPage
 from playwright.async_api import expect as expect_async
 
 from config import (
-    CLEAR_CHAT_BUTTON_SELECTOR,
-    CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR,
-    CLICK_TIMEOUT_MS,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_STOP_SEQUENCES,
     DEFAULT_TEMPERATURE,
@@ -28,7 +25,6 @@ from config import (
 )
 from models import ClientDisconnectedError, QuotaExceededError
 
-from .initialization import enable_temporary_chat_mode
 from .operations import (
     _get_final_response_content,
     _wait_for_response_completion,
@@ -151,19 +147,21 @@ class PageController(
         )
 
     async def clear_chat_history(self, check_client_disconnected: Callable):
-        """Clear chat history and invalidate function calling cache."""
+        """Clear chat history and invalidate function calling cache.
+
+        Delegates to ``ChatController``. That implementation tolerates the
+        "Create a new chat / Discard and continue" confirmation the New-chat
+        button raises when the page still holds text - the naive click used to
+        hang on that modal ("performing click action" until the 3s timeout) and
+        surface as a 502 on a turn that never reached the model - and falls back
+        to navigating to the new-chat URL when the dialog machinery wedges.
+        """
         self.logger.info(f"[{self.req_id}] Clearing chat history...")
 
         # Invalidate FC cache since we're starting a new chat
         self.invalidate_fc_cache("new_chat")
 
-        btn = self.page.locator(CLEAR_CHAT_BUTTON_SELECTOR)
-        if await btn.is_enabled(timeout=5000):
-            await btn.click(timeout=CLICK_TIMEOUT_MS)
-            confirm = self.page.locator(CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR)
-            if await confirm.is_visible(timeout=2000):
-                await confirm.click(timeout=CLICK_TIMEOUT_MS)
-            await enable_temporary_chat_mode(self.page)
+        await super().clear_chat_history(check_client_disconnected)
 
     async def _model_is_locked(self) -> bool:
         """

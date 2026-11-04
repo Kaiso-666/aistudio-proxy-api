@@ -11,8 +11,10 @@ network interceptor-based parsing in stream/interceptors.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -340,6 +342,7 @@ class FunctionCallResponseParser:
             FunctionCallParseResult with all detected function calls.
         """
         result = FunctionCallParseResult()
+        source = "none"
 
         try:
             # Strategy 1: Try native function call parsing first (ms-function-call-chunk)
@@ -348,6 +351,7 @@ class FunctionCallResponseParser:
             if native_calls:
                 result.function_calls.extend(native_calls)
                 result.has_function_calls = True
+                source = "native"
                 if FUNCTION_CALLING_DEBUG:
                     self.logger.debug(
                         f"[{self.req_id}] Found {len(native_calls)} native function call(s)"
@@ -359,6 +363,7 @@ class FunctionCallResponseParser:
                 if widget_calls:
                     result.function_calls.extend(widget_calls)
                     result.has_function_calls = True
+                    source = "widget"
 
             # Strategy 3: Try code block parsing
             if not result.has_function_calls:
@@ -366,6 +371,7 @@ class FunctionCallResponseParser:
                 if code_block_calls:
                     result.function_calls.extend(code_block_calls)
                     result.has_function_calls = True
+                    source = "code_block"
 
             # Strategy 4: Always try to get text content, and use text pattern matching if no calls found yet
             text_calls, text_content = await self._parse_text_function_calls()
@@ -374,9 +380,24 @@ class FunctionCallResponseParser:
             if not result.has_function_calls and text_calls:
                 result.function_calls.extend(text_calls)
                 result.has_function_calls = True
+                source = "text"
 
             # Deduplicate function calls by name + arguments
             result.function_calls = self._deduplicate_calls(result.function_calls)
+
+            # A call that lost its arguments is a defect, whichever strategy
+            # produced it; name the strategy and keep the markup.
+            empty_args = [
+                call.name
+                for call in result.function_calls
+                if not getattr(call, "arguments", None)
+            ]
+            if empty_args:
+                self.logger.warning(
+                    f"[{self.req_id}] [FC:Parse] source={source} "
+                    f"calls={len(result.function_calls)} empty_args={empty_args}"
+                )
+                await self._dump_page_for_fc(source)
 
             if FUNCTION_CALLING_DEBUG:
                 self.logger.debug(
@@ -474,17 +495,25 @@ class FunctionCallResponseParser:
                     )
                 return None
 
-            # Extract arguments from pre > code block
+            # Extract arguments from pre > code block. The JSON lives inside a
+            # mat-expansion-panel body: collapsed it may not be rendered at all,
+            # and right after expanding it is empty until Angular paints it, so
+            # the read is retried rather than taken once.
             args_elem = chunk.locator(NATIVE_FUNCTION_CALL_ARGS_SELECTOR)
             arguments: Dict[str, Any] = {}
+            args_text = await self._read_chunk_args(chunk, args_elem)
 
-            if await args_elem.count() > 0:
-                args_text = await args_elem.first.inner_text(timeout=2000)
+            if args_text.strip():
                 arguments = self._parse_arguments(args_text)
                 if FUNCTION_CALLING_DEBUG:
                     self.logger.debug(
                         f"[{self.req_id}] Extracted arguments for {function_name}: {list(arguments.keys())}"
                     )
+            if not arguments:
+                # A tool call with no arguments is legal; one that silently lost
+                # its arguments is not. Keep the DOM and the raw text so the
+                # selector can be repaired from observation.
+                await self._dump_chunk_debug(chunk, function_name, args_text)
 
             return _create_parsed_call(
                 name=function_name,
@@ -496,6 +525,137 @@ class FunctionCallResponseParser:
             if FUNCTION_CALLING_DEBUG:
                 self.logger.debug(f"[{self.req_id}] Error parsing native chunk: {e}")
             return None
+
+    async def _dump_page_for_fc(self, source: str) -> None:
+        """Save the response markup when a tool call is parsed without args."""
+        try:
+            html = await self.page.evaluate(
+                """() => {
+                    const turns = document.querySelectorAll('ms-chat-turn');
+                    const last = turns[turns.length - 1];
+                    return last ? last.outerHTML : document.body.outerHTML;
+                }"""
+            )
+            dump_dir = os.path.join("browser_utils", "..", "errors_py")
+            os.makedirs(dump_dir, exist_ok=True)
+            path = os.path.join(dump_dir, f"fc_page_{self.req_id}_{source}.html")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(html or "")
+            self.logger.warning(
+                f"[{self.req_id}] [FC:Parse] last chat turn saved to {path}"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                f"[{self.req_id}] [FC:Parse] could not dump page: {exc}"
+            )
+
+    async def _read_locator_text(self, locator: Locator) -> str:
+        """Read a locator's text, tolerating hidden or missing elements."""
+        try:
+            if await locator.count() == 0:
+                return ""
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return ""
+        for reader in ("inner_text", "text_content"):
+            try:
+                value = await getattr(locator.first, reader)(timeout=1000)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+            if value and value.strip():
+                return value
+        return ""
+
+    async def _read_chunk_args(self, chunk: Locator, args_elem: Locator) -> str:
+        """Read the argument JSON of a native function-call chunk.
+
+        The body renders asynchronously: a panel can report ``aria-expanded``
+        while its content is still empty for a frame or two, so an immediate
+        read returns "" and the call is emitted with empty arguments. Poll, and
+        fall back to a raw ``textContent`` read that does not depend on the
+        element being attached or visible.
+        """
+        text = await self._read_locator_text(args_elem)
+        if text.strip():
+            return text
+
+        await self._expand_function_call_chunk(chunk)
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            text = await self._read_locator_text(
+                chunk.locator(NATIVE_FUNCTION_CALL_ARGS_SELECTOR)
+            )
+            if text.strip():
+                return text
+
+        try:
+            raw = await chunk.evaluate(
+                """el => {
+                    const pre = el.querySelector(
+                        'mat-expansion-panel-body pre code, pre code'
+                    );
+                    return pre ? pre.textContent : '';
+                }"""
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raw = ""
+        return raw or text
+
+    async def _expand_function_call_chunk(self, chunk: Locator) -> bool:
+        """Expand a collapsed function-call chunk so its body renders.
+
+        Returns True when a click was issued, i.e. the caller should re-read the
+        arguments selector.
+        """
+        try:
+            header = chunk.locator("mat-expansion-panel-header, mat-panel-title")
+            if await header.count() == 0:
+                return False
+            try:
+                expanded = await header.first.get_attribute("aria-expanded")
+            except Exception:
+                expanded = None
+            if expanded == "true":
+                return False
+            await header.first.click(timeout=2000)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    async def _dump_chunk_debug(
+        self, chunk: Locator, function_name: str, args_text: str = ""
+    ) -> None:
+        """Persist the chunk markup when a function call arrives without args."""
+        try:
+            html = await chunk.evaluate("el => el.outerHTML")
+            dump_dir = os.path.join("browser_utils", "..", "errors_py")
+            os.makedirs(dump_dir, exist_ok=True)
+            safe_name = re.sub(r"[^\w.-]", "_", function_name or "unknown")
+            path = os.path.join(
+                dump_dir, f"fc_chunk_{self.req_id}_{safe_name}.html"
+            )
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(html or "")
+            preview = (args_text or "").strip().replace("\n", "\\n")[:300]
+            self.logger.warning(
+                f"[{self.req_id}] Function call '{function_name}' parsed without "
+                f"arguments (raw args_text={preview!r}); chunk DOM saved to {path}"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                f"[{self.req_id}] Could not dump function-call chunk DOM: {exc}"
+            )
 
     def _extract_function_name_from_header(self, header_text: str) -> str:
         """Extract function name from header text, removing icons and extra content.

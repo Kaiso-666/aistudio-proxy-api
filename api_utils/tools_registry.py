@@ -78,6 +78,21 @@ def register_runtime_tools(
         pass
 
 
+def can_execute_locally(name: str) -> bool:
+    """True when this server has a real handler for the named tool.
+
+    Declaring a tool in the request does not give the proxy a way to run it:
+    only built-in handlers and configured MCP endpoints can be executed here.
+    Anything else belongs to the client, so the model must be asked for the
+    call instead of the proxy inventing one.
+    """
+    if name in FUNCTION_REGISTRY:
+        return True
+    if name in _ALLOWED_RUNTIME_TOOLS:
+        return bool(_runtime_mcp_endpoint or os.environ.get("MCP_HTTP_ENDPOINT"))
+    return False
+
+
 async def execute_tool_call(name: str, arguments_json: str) -> str:
     """Execute registered tools and return stringified result. Unknown tools return descriptive errors.
     Fully asynchronous: built-in functions execute directly; MCP path uses async httpx client.

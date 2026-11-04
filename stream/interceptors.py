@@ -2,7 +2,9 @@ import json
 import logging
 import re
 import sys
+import time
 import zlib
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote
 
@@ -46,6 +48,28 @@ class HttpInterceptor:
         logging.getLogger("websockets").setLevel(logging.ERROR)
         # Silence http_interceptor by default (too verbose)
         logging.getLogger("http_interceptor").setLevel(logging.WARNING)
+
+    def _dump_wire_args(self, func_name: str, args: Any) -> None:
+        """Append raw wire arguments to a file when decoding fails.
+
+        The stream proxy runs as a console-less multiprocessing child, so its
+        stderr - and therefore every log record it emits - is discarded. A tool
+        call that loses its arguments can only be repaired from the wire shape,
+        so it is persisted here instead of logged.
+        """
+        try:
+            log_path = Path(self.log_dir) / "fc_debug" / "wire_args.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                payload = json.dumps(args)
+            except (TypeError, ValueError):
+                payload = repr(args)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} {func_name} {payload[:8000]}\n"
+                )
+        except Exception:
+            pass
 
     def reset_for_new_request(self) -> None:
         """Reset interceptor state for a new request.
@@ -229,6 +253,7 @@ class HttpInterceptor:
 
                             # Log warning if params are empty for tracking potential parse failures
                             if not params:
+                                self._dump_wire_args(func_name, raw_args)
                                 if FUNCTION_CALLING_DEBUG:
                                     self.logger.warning(
                                         f"[FC:Wire] Function '{func_name}' parsed with empty args - "
@@ -239,6 +264,19 @@ class HttpInterceptor:
                                         func_name=func_name,
                                         params=params,
                                         success=False,
+                                    )
+                                else:
+                                    # Unconditional: a tool call that lost its
+                                    # arguments is a defect, and the wire shape
+                                    # is the only evidence for repairing the
+                                    # decoder.
+                                    try:
+                                        raw_preview = json.dumps(raw_args)[:1500]
+                                    except (TypeError, ValueError):
+                                        raw_preview = str(raw_args)[:1500]
+                                    self.logger.warning(
+                                        f"[FC:Wire] '{func_name}' parsed with empty args; "
+                                        f"raw={raw_preview}"
                                     )
                             else:
                                 if FUNCTION_CALLING_DEBUG:
@@ -349,7 +387,14 @@ class HttpInterceptor:
             # A parameter list is a list of [name, value] tuples where name is a string
             params = self._unwrap_to_param_list(args)
             if params is None:
-                self.logger.warning(f"Could not find param list in args: {args}")
+                self._dump_wire_args("__unwrap_failed__", args)
+                try:
+                    raw_preview = json.dumps(args)[:1500]
+                except (TypeError, ValueError):
+                    raw_preview = str(args)[:1500]
+                self.logger.warning(
+                    f"[FC:Wire] Could not find a param list in args; raw={raw_preview}"
+                )
                 return {}
 
             func_params = {}

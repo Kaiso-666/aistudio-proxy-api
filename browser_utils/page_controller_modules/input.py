@@ -25,6 +25,125 @@ from .base import BaseController
 class InputController(BaseController):
     """Handles prompt input and submission."""
 
+    async def submit_function_response(
+        self, response_text: str, check_client_disconnected: Callable
+    ) -> bool:
+        """Answer a pending native function call through AI Studio's own UI.
+
+        After a native function call the turn stays open with an "Enter function
+        response" field and the model waits on it. Submitting the result as an
+        ordinary prompt leaves that call unresolved, and the model simply
+        re-issues the identical call (same name, same arguments) instead of
+        using the result - which is what a client sees as "tools don't work".
+
+        Returns True when a response was submitted, False when no call is
+        pending (normal prompt submission then applies).
+        """
+        try:
+            chunks = self.page.locator("ms-function-call-chunk")
+            chunk_count = await chunks.count()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+        for index in range(chunk_count - 1, -1, -1):
+            chunk = chunks.nth(index)
+            field = chunk.locator('input[placeholder="Enter function response"]')
+            try:
+                if await field.count() == 0:
+                    continue
+                if not await field.first.is_visible():
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+            self.logger.info(
+                f"[{self.req_id}] [FC:UI] Pending native function call found; "
+                "submitting its response through the widget."
+            )
+            try:
+                await field.first.click(timeout=3000)
+                await field.first.fill("")
+                await field.first.fill(response_text)
+            except asyncio.CancelledError:
+                raise
+            except Exception as fill_err:
+                self.logger.warning(
+                    f"[{self.req_id}] [FC:UI] Response field fill failed: {fill_err}"
+                )
+                return False
+
+            submit = chunk.locator('form.input-form button[type="submit"]')
+            deadline = asyncio.get_event_loop().time() + 5.0
+            ready = False
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    if await submit.first.count() == 0:
+                        break
+                    aria_disabled = await submit.first.get_attribute("aria-disabled")
+                    if aria_disabled != "true":
+                        ready = True
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
+
+            try:
+                turns_before = await self.page.locator("ms-chat-turn").count()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                turns_before = -1
+
+            try:
+                await submit.first.click(timeout=3000)
+            except asyncio.CancelledError:
+                raise
+            except Exception as click_err:
+                self.logger.warning(
+                    f"[{self.req_id}] [FC:UI] Response submit click failed "
+                    f"({click_err}); forcing."
+                )
+                try:
+                    await submit.first.click(timeout=3000, force=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return False
+
+            # A turn that never starts looks exactly like success at the click,
+            # and the caller would then read the previous turn's chunk as if it
+            # were the model's answer. Wait for the chat to actually grow.
+            turns_after = turns_before
+            deadline = asyncio.get_event_loop().time() + 8.0
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    turns_after = await self.page.locator("ms-chat-turn").count()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    break
+                if turns_before < 0 or turns_after > turns_before:
+                    break
+                await asyncio.sleep(0.2)
+
+            self.logger.info(
+                f"[{self.req_id}] [FC:UI] Function response submitted "
+                f"(enabled={ready}, {len(response_text)} chars, "
+                f"turns {turns_before}->{turns_after})."
+            )
+            await self._check_disconnect(
+                check_client_disconnected, "After function response submit"
+            )
+            return turns_before < 0 or turns_after > turns_before
+
+        return False
+
     async def submit_prompt(
         self, prompt: str, image_list: List, check_client_disconnected: Callable
     ):

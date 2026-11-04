@@ -7,10 +7,12 @@ from playwright.async_api import expect as expect_async
 from browser_utils.initialization import enable_temporary_chat_mode
 from browser_utils.operations import save_error_snapshot
 from config import (
+    AI_STUDIO_URL_PATTERN,
     CLEAR_CHAT_BUTTON_SELECTOR,
     CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR,
     CLEAR_CHAT_VERIFY_TIMEOUT_MS,
     CLICK_TIMEOUT_MS,
+    INPUT_SELECTOR,
     OVERLAY_SELECTOR,
     RESPONSE_CONTAINER_SELECTOR,
     SUBMIT_BUTTON_SELECTOR,
@@ -96,13 +98,29 @@ class ChatController(BaseController):
             )
 
             if can_attempt_clear:
-                await self._execute_chat_clear(
-                    clear_chat_button_locator,
-                    confirm_button_locator,
-                    overlay_locator,
-                    check_client_disconnected,
-                )
-                await self._verify_chat_cleared(check_client_disconnected)
+                try:
+                    await self._execute_chat_clear(
+                        clear_chat_button_locator,
+                        confirm_button_locator,
+                        overlay_locator,
+                        check_client_disconnected,
+                    )
+                    await self._verify_chat_cleared(check_client_disconnected)
+                except asyncio.CancelledError:
+                    raise
+                except ClientDisconnectedError:
+                    raise
+                except Exception as clear_err:
+                    # The in-place clear is an optimisation, not the contract:
+                    # the contract is "the next submit starts from an empty
+                    # chat". Anything that wedges the dialog machinery is
+                    # recoverable by opening the new-chat URL directly, which
+                    # cannot raise the "Create a new chat" confirmation at all.
+                    self.logger.warning(
+                        "[Chat] In-place clear failed (%s); resetting through the "
+                        "new-chat URL instead." % clear_err
+                    )
+                    await self._new_chat_via_navigation(check_client_disconnected)
                 self.logger.debug("[Chat] Re-enabling temporary chat mode")
                 await enable_temporary_chat_mode(self.page)
 
@@ -185,11 +203,32 @@ class ChatController(BaseController):
                     raise
                 except Exception:
                     pass
+
+                from browser_utils.overlays import (
+                    dismiss_blocking_dialogs,
+                    force_clear_overlays,
+                )
+
+                # The click itself commonly raises the "Create a new chat"
+                # confirmation: the composer still holds text, so the button
+                # asks first. That dialog owns the viewport, which is exactly
+                # what makes the click's own actionability check time out.
+                # Accepting it performs the reset we were asking for.
+                try:
+                    confirmed = await dismiss_blocking_dialogs(self.page, self.logger)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    confirmed = 0
+                if confirmed and await self._is_chat_empty():
+                    self.logger.info(
+                        "[Chat] Confirmation dialog accepted; chat is already reset."
+                    )
+                    return
+
                 # A backdrop that survived Escape is detached rather than
                 # fought with: it is the difference between retrying the click
                 # and failing the whole request.
-                from browser_utils.overlays import force_clear_overlays
-
                 await force_clear_overlays(self.page, self.logger)
                 try:
                     await clear_chat_button_locator.click(
@@ -198,6 +237,11 @@ class ChatController(BaseController):
                 except asyncio.CancelledError:
                     raise
                 except Exception as force_click_err:
+                    if await self._is_chat_empty():
+                        self.logger.info(
+                            "[Chat] Clear succeeded even though the click reported an error."
+                        )
+                        return
                     self.logger.error(
                         f"Force click on clear button still failed: {force_click_err}"
                     )
@@ -328,6 +372,43 @@ class ChatController(BaseController):
                     continue
                 else:
                     raise
+
+    async def _is_chat_empty(self) -> bool:
+        """True when no response container is visible, i.e. the chat is blank."""
+        try:
+            container = self.page.locator(RESPONSE_CONTAINER_SELECTOR)
+            if await container.count() == 0:
+                return True
+            return not await container.last.is_visible()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    async def _new_chat_via_navigation(self, check_client_disconnected: Callable):
+        """Open a fresh chat by navigating to the new-chat URL.
+
+        Deterministic alternative to the New-chat button. That button raises a
+        "Create a new chat / Discard and continue" confirmation whenever the
+        page holds text; the dialog owning the viewport makes Playwright's own
+        click actionability check time out at "performing click action", which
+        surfaced as a 502 on a turn that never reached the model. Navigation
+        cannot raise that dialog.
+
+        Model, thinking level, tool registration and advanced settings are
+        re-applied per request by ``adjust_parameters`` before the submit, so
+        the page state reset here is not lost.
+        """
+        target_url = f"https://{AI_STUDIO_URL_PATTERN}prompts/new_chat"
+        self.logger.info(f"[Chat] Navigating to a fresh chat: {target_url}")
+        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        await expect_async(self.page.locator(INPUT_SELECTOR)).to_be_visible(
+            timeout=30000
+        )
+        self.logger.info("[Chat] Fresh chat ready after navigation.")
+        await self._check_disconnect(
+            check_client_disconnected, "New chat navigation"
+        )
 
     async def _dismiss_backdrops(self):
         """Attempt to close potentially remaining cdk transparent overlays to avoid intercepting clicks,

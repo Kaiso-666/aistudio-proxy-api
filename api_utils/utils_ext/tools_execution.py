@@ -15,11 +15,16 @@ async def maybe_execute_tools(
     tool_choice: Optional[Union[str, Dict[str, Any]]],
 ) -> Optional[List[Dict[str, Any]]]:
     """
-    Active function execution based on tools/tool_choice:
-    - If tool_choice specifies a function name (string or {type:'function', function:{name}}), attempt to execute that function.
-    - If tool_choice is 'auto' and only one tool is provided, execute that tool.
-    - Argument source: Attempt to extract JSON from the text of the most recent user message; if fails, use empty parameters.
-    - Returns [{name, arguments, result}]; returns None if no executable is found.
+    Actively execute a tool only when that is unambiguous and actually possible.
+
+    - A named function (string or {type:'function', function:{name}}) is
+      executed only if this server has a real handler for it.
+    - 'auto' / 'required' / 'any' never execute here: they delegate the choice
+      of function *and* its arguments to the model. Executing a single declared
+      tool under 'auto' used to skip the model entirely and return a fabricated
+      call whose arguments were scraped from the user's text - in practice
+      always "{}", which breaks every agent that sends one tool at a time.
+    - Returns [{name, arguments, result}]; None when nothing should run here.
     """
     try:
         # Track runtime-declared tools and optional MCP endpoints
@@ -41,20 +46,8 @@ async def maybe_execute_tools(
                     chosen_name = name_raw
         elif isinstance(tool_choice, str):
             lc = tool_choice.lower()
-            if lc in ("none", "no", "off"):
+            if lc in ("none", "no", "off", "auto", "required", "any"):
                 return None
-            if lc in ("auto", "required", "any"):
-                if isinstance(tools, list) and len(tools) == 1:
-                    first_tool = tools[0]
-                    func_raw = first_tool.get("function", {})
-                    if isinstance(func_raw, dict):
-                        name_from_func = func_raw.get("name")
-                        if isinstance(name_from_func, str):
-                            chosen_name = name_from_func
-                    if not chosen_name:
-                        name_from_tool = first_tool.get("name")
-                        if isinstance(name_from_tool, str):
-                            chosen_name = name_from_tool
             else:
                 chosen_name = tool_choice
         elif tool_choice is None:
@@ -62,6 +55,13 @@ async def maybe_execute_tools(
             return None
 
         if not chosen_name:
+            return None
+
+        from api_utils.tools_registry import can_execute_locally
+
+        if not can_execute_locally(chosen_name):
+            # Declared by the client, not executable here. Let the model emit
+            # the call with real arguments instead of fabricating "{}".
             return None
 
         user_text = get_latest_user_text(messages)

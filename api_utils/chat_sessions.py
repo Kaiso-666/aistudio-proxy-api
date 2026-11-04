@@ -361,6 +361,34 @@ def resolve(req_id: str, messages: Sequence[Any], model: str, tools) -> Resoluti
     )
 
 
+def force_tool_replay(resolution: Resolution, messages: Sequence[Any]) -> Resolution:
+    """Rewrite the transcript into a fresh chat when a turn answers a tool call.
+
+    AI Studio's native function calling leaves the turn open on an "Enter
+    function response" widget. Continuing that same chat after answering it
+    makes the model re-issue the identical call instead of using the result
+    (measured: same name, same arguments, no progress). Rewriting the exchange
+    into a fresh chat is deterministic: the transcript carries the call and its
+    result as text, and the model answers.
+
+    Costs one chat clear per tool turn, which is the price of correctness.
+    """
+    if resolution.mode == "full" and resolution.needs_clear:
+        return resolution
+
+    messages = list(messages)
+    est = estimate_tokens(messages)
+    return Resolution(
+        key=resolution.key,
+        messages=messages,
+        mode="full",
+        needs_clear=True,
+        rotation_due=resolution.rotation_due,
+        page_tokens=est,
+        est_tokens=est,
+    )
+
+
 # --- commit ----------------------------------------------------------------
 
 
