@@ -293,3 +293,93 @@ that have no mat-dialog-container pane behind them.
 - typing uses real key events only up to HUMAN_TYPE_MAX_CHARS (40). At
   ~157ms/char, anything longer goes through insert_text.
 
+
+## 12. Tool calling: four defects that made it unusable as an agent backend
+
+Symptom reported: "it is not using tools properly, and tool output leaks into
+chat". All four causes are independent; each one alone breaks a tool-using
+client.
+
+### 12.1 A fabricated call instead of asking the model
+
+`api_utils/utils_ext/tools_execution.py::maybe_execute_tools` executed a tool
+locally when `tool_choice` was `auto` (or `required`/`any`) and the request
+declared exactly one tool. Arguments came from `extract_json_from_text()` over
+the user's message, so in practice `{}`. The model was never consulted, and the
+client received a call it had to run with no arguments.
+
+Under `auto` the *client* is delegating the choice of function and its arguments
+to the model. Local execution is now limited to a named function that this
+server can actually run - a built-in in `FUNCTION_REGISTRY`, or a runtime tool
+with an MCP endpoint (`tools_registry.can_execute_locally`). Anything else
+returns None and goes to the model.
+
+### 12.2 The New-chat click that hangs on its own confirmation
+
+`PageController.clear_chat_history` overrode the hardened `ChatController`
+implementation with a naive `btn.click()`. With text still on the page the
+button raises "Create a new chat / Discard and continue"; the dialog's backdrop
+owns the viewport, Playwright's own actionability check never completes, and the
+call fails at "performing click action" after the full 3s timeout. The client
+gets a 502 on a turn that never reached the model.
+
+`PageController.clear_chat_history` now delegates with `super()`. The hardened
+path dismisses the confirmation, treats a click error as non-fatal if the chat
+is already empty, and finally navigates to
+`https://<AI_STUDIO_URL_PATTERN>prompts/new_chat` - navigation cannot raise that
+confirmation at all. The URL does not need `?model=`: the model comes from
+`localStorage.aiStudioUserPromptModel` and is re-applied by `adjust_parameters`
+before every submit.
+
+### 12.3 Arguments lost to a not-yet-painted panel
+
+A native call renders its arguments inside `mat-expansion-panel > pre > code`.
+The panel reports `aria-expanded="true"` before the body paints, so a read
+immediately after expanding returns `""`, `_parse_arguments("")` returns `{}`,
+and the call goes out with no arguments. `_read_chunk_args` now polls (20 x
+100ms) regardless of the reported expansion state and then falls back to a raw
+`textContent` read via `evaluate`, which does not depend on attachment or
+visibility. When a call still parses without arguments the chunk DOM is written
+to `errors_py/fc_chunk_<req>_<name>.html` with the raw text in the log line.
+
+### 12.4 Answering a tool call in place makes the model call again
+
+Submitting the result into the same native function-call turn leaves AI Studio's
+"Enter function response" widget in charge of that turn: the model re-issued the
+identical call (same name, same arguments) instead of using the result. Measured
+twice, with and without `submit_function_response`.
+
+`chat_sessions.force_tool_replay()` now rewrites any turn whose last message is
+`role: tool` into a full replay in a fresh chat. The transcript carries the call
+and its result as text, and the model answers. Cost: one chat clear (~5s) per
+tool turn - the price of a deterministic answer.
+
+`submit_function_response` (input.py) is kept as a fallback: it finds the last
+`ms-function-call-chunk` with a visible `input[placeholder="Enter function
+response"]`, fills it, clicks that chunk's submit button and waits for the chat
+to actually grow (`ms-chat-turn` count) before reporting success.
+
+### 12.5 Emulated mode is not an alternative
+
+`FUNCTION_CALLING_MODE=emulated` was measured on the same prompt: the model
+returned prose ("I have the `read_file` tool and its schema in mind...") and
+`finish_reason=stop`, i.e. no call at all. Native/auto is the only mode that
+produces calls with arguments. Keep `FUNCTION_CALLING_MODE=auto`.
+
+### 12.6 Verified round-trip
+
+Two turns, three declared tools, `tool_choice=auto`:
+
+```
+T1 finish=tool_calls call=read_file args={"path": "C:\\Users\\meow\\notes.txt"}
+T2 finish=stop content="The file ... says: > the magic word is ORANGE-42"
+```
+
+T2 took 97s: clear + full replay + native FC setup + generation.
+
+### 12.7 Wire-format diagnostics
+
+The stream proxy is a console-less multiprocessing child, so its logging is
+discarded. When the interceptor cannot decode arguments it appends the raw shape
+to `logs/fc_debug/wire_args.log` (`stream/interceptors.py::_dump_wire_args`)
+instead of trying to log it.
