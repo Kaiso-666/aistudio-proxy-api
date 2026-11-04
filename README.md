@@ -1,209 +1,276 @@
-# AI Studio Proxy API
+# AI Studio Proxy API — hardened fork
 
-将 Google AI Studio 网页界面转换为 OpenAI 兼容 API 的代理服务。通过 Camoufox + Playwright 自动化，提供稳定可控的 API 访问。
+Turn Google AI Studio's web UI into an OpenAI-compatible API at
+`http://127.0.0.1:2048/v1`, driven by Camoufox + Playwright. No API key, no
+quota dashboard, no official SDK — the proxy types into the real web app and
+reads the answer back.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=CJackHwang/AIstudioProxyAPI&type=Date)](https://www.star-history.com/#CJackHwang/AIstudioProxyAPI&Date)
+This is a hardened fork of
+[CJJackHwang/AIstudioProxyAPI](https://github.com/CJJackHwang/AIstudioProxyAPI),
+tuned to sit behind an agent harness (OpenCode, Open WebUI, Cline, anything that
+speaks the OpenAI chat-completions protocol). The upstream project is the
+foundation; the differences are listed under
+[What this fork changes](#what-this-fork-changes).
 
 ---
 
-## 主要特性
+## Why this fork exists
 
-- **OpenAI 兼容 API**：支持 `/v1/chat/completions`、`/v1/models`
-- **函数调用三模式**：`auto` / `native` / `emulated`，支持失败回退
-- **认证轮转与 Cookie 刷新**：支持 profile 自动轮转、周期刷新与关停保存
-- **启动链路完整**：CLI 启动器、内置 Web UI、桌面 GUI 启动器
-- **现代化前端**：内置设置页、状态检查与日志能力
-- **CI/CD 工作流**：PR 检查、Release、Upstream Sync
+The upstream proxy works as a chat relay but breaks down as an agent backend:
 
-## 系统要求
+- requests took ~52 s;
+- a tool call could be fabricated locally with `{}` arguments, without the model
+  ever being asked;
+- a New-chat click could hang on its own confirmation dialog and return 502;
+- answering a tool call made the model re-issue the identical call.
 
-| 组件 | 要求 | 推荐 |
+All four are fixed here and verified end to end. `FORK-NOTES.md` records every
+change with the measurements behind it.
+
+---
+
+## Features
+
+- **OpenAI-compatible surface** — `/v1/chat/completions` (streaming and
+  non-streaming), `/v1/models`, `/health`.
+- **Always the newest Flash** — the client's `model` field is advisory; the
+  proxy pins `AI_STUDIO_FORCE_MODEL` so no stale name reaches the UI.
+- **Persistent chat sessions** — the AI Studio chat stays loaded between turns,
+  and only the new tail is submitted when the stored transcript is a strict
+  prefix of the incoming history.
+- **Context rotation** — at `SESSION_CONTEXT_LIMIT_TOKENS` the chat is
+  summarised, cleared, and reseeded with a `[CONTEXT HANDOFF]` block, so an
+  agent session can run past a single context window.
+- **Native function calling that actually works** — model-issued calls with
+  real arguments, and tool results the model consumes.
+- **Throttle semantics** — upstream `PERMISSION_DENIED` is reported as
+  `429` with `Retry-After` instead of a hard failure.
+- **Auth rotation** — profile rotation, periodic cookie refresh, and save on
+  shutdown.
+
+---
+
+## Requirements
+
+| Component | Requirement | Recommended |
 | --- | --- | --- |
-| Python | >=3.9, <4.0 | 3.10+ / 3.11+ |
-| 依赖管理 | Poetry | 最新版本 |
-| Node.js | 前端构建需要 | LTS |
-| 内存 | >=2GB | >=4GB |
+| Python | >= 3.9, < 4.0 | 3.11+ |
+| Node.js | frontend build only | LTS |
+| RAM | 2 GB | 4 GB+ (Camoufox is a full Firefox) |
+| OS | Windows / Linux | either; Windows is what this fork is tested on |
+
+Camoufox downloads its own Firefox build on first launch (~150 MB).
 
 ---
 
-## 🚀 快速开始
-
-### 1. 克隆并安装
+## Quick start
 
 ```bash
-git clone https://github.com/CJackHwang/AIstudioProxyAPI.git
-cd AIstudioProxyAPI
-poetry install --with dev
-```
-
-### 2. 配置环境
-
-```bash
+git clone https://github.com/Kaiso-666/aistudio-proxy-api.git
+cd aistudio-proxy-api
+python -m venv .venv
+# Windows: .venv\Scripts\activate    Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
-建议先确认：`PORT`、`STREAM_PORT`、`UNIFIED_PROXY_CONFIG`、`LAUNCH_MODE`、`FUNCTION_CALLING_MODE`。
-
-### 3. 首次认证并启动
+### 1. Log in once
 
 ```bash
-# 首次建议 debug，完成登录并保存 auth
-poetry run python launch_camoufox.py --debug
-
-# 日常建议 headless
-poetry run python launch_camoufox.py --headless
+python launch_camoufox.py --debug
 ```
 
-### 快速测试
+A visible browser opens. Sign into Google, then let the proxy save the session
+to `auth_profiles/active/login.json`. Keep that file private — it is a live
+Google session.
+
+### 2. Run headless
 
 ```bash
-# 健康检查
+python launch_camoufox.py --headless \
+  --active-auth-json auth_profiles/active/login.json \
+  --server-port 2048 --stream-port 3120
+```
+
+Startup takes ~50–90 s. Wait for it:
+
+```bash
 curl http://127.0.0.1:2048/health
+# {"status":"OK","details":{"is_playwright_ready":true,"is_browser_connected":true,...}}
+```
 
-# 模型列表
-curl http://127.0.0.1:2048/v1/models
+### 3. Talk to it
 
-# 聊天请求
+```bash
 curl -X POST http://127.0.0.1:2048/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-访问 `http://127.0.0.1:2048/` 使用内置 Web UI。
+The built-in web UI is at `http://127.0.0.1:2048/`.
 
 ---
 
-## 系统架构
+## Client configuration
+
+Any OpenAI-compatible client: base URL `http://127.0.0.1:2048/v1`, and any
+non-empty API key — the proxy does not authenticate requests.
+
+OpenCode (`~/.config/opencode/opencode.json`):
+
+```json
+{
+  "providers": {
+    "aistudio": {
+      "name": "AI Studio Proxy (local)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:2048/v1",
+        "apiKey": "sk-local-proxy"
+      },
+      "models": {
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash (AI Studio, pinned)",
+          "limit": { "context": 1000000, "output": 32000 }
+        }
+      }
+    }
+  }
+}
+```
+
+Open WebUI: Settings → Connections → add `http://127.0.0.1:2048/v1`.
+
+---
+
+## Configuration
+
+Everything lives in `.env`. The values that matter most:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `2048` | API port |
+| `STREAM_PORT` | `3120` | internal stream-proxy port (`0` disables) |
+| `LAUNCH_MODE` | `normal` | `headless` / `normal` / `virtual_headless` |
+| `UNIFIED_PROXY_CONFIG` | empty | upstream HTTP(S) proxy, if any |
+| `AUTO_ROTATE_AUTH_PROFILE` | `true` | rotate saved auth profiles |
+| `AI_STUDIO_FORCE_MODEL` | `gemini-3.8-flash` | the model actually used, whatever the client asks for |
+| `AI_STUDIO_MODEL_FALLBACKS` | empty | comma-separated fallbacks if the pinned model is unavailable |
+| `DEFAULT_THINKING_LEVEL_FLASH` | `high` | `low` / `medium` / `high` — drives token spend |
+| `DEFAULT_THINKING_LEVEL_PRO` | `high` | same, for Pro models |
+| `FUNCTION_CALLING_MODE` | `auto` | `auto` (native + fallback) / `native` / `emulated` |
+| `FUNCTION_CALLING_CACHE_ENABLED` | `true` | skip redundant tool-panel automation |
+| `SESSION_CONTEXT_LIMIT_TOKENS` | `900000` | rotate the chat above this size |
+| `HUMAN_TYPE_MAX_CHARS` | `40` | longer prompts are inserted, not typed |
+| `CAMOUFOX_HUMANIZE_MAX_TIME` | `0.55` | cap on synthetic pointer travel per click |
+
+Lower `SESSION_CONTEXT_LIMIT_TOKENS` (e.g. `150000`) to stretch a free-tier
+daily quota much further; every rotation costs one summarise + clear cycle.
+
+Full reference: [docs/configuration-reference.md](docs/configuration-reference.md)
+(upstream docs — still accurate for shared settings).
+
+---
+
+## What this fork changes
+
+Measured, not estimated. Details and evidence in `FORK-NOTES.md`.
+
+| Area | Upstream | This fork |
+| --- | --- | --- |
+| Request latency | ~52 s | ~22 s (cached settings probe, capped humanize, bounded typing) |
+| `model` field | used verbatim, can hit gated/broken names | pinned to the newest Flash; client value is advisory |
+| Long sessions | full transcript re-uploaded every turn | stored prefix ⇒ delta submit only |
+| Context limit | none | rotation with summarised `[CONTEXT HANDOFF]` |
+| Tool calls | could be fabricated locally with `{}` args | only model-issued calls; empty-argument calls are trapped and the DOM dumped |
+| Tool results | sometimes re-triggered the same call | replayed into a fresh chat so the model consumes the result |
+| Upstream 403 | surfaced as failure | `429` + `Retry-After` |
+| New-chat click | could hang on its own confirmation dialog → 502 | dialog-safe path with URL navigation fallback |
+
+---
+
+## Architecture
 
 ```mermaid
 graph TD
-    subgraph "用户端"
-        User["用户"]
-        WebUI["Web UI"]
-        APIClient["API 客户端"]
+    subgraph Client
+        UI["Web UI"]
+        API["OpenAI client"]
     end
 
-    subgraph "启动与配置"
-        Launcher["launch_camoufox.py"]
-        Env[".env 配置"]
+    subgraph Launcher
+        L["launch_camoufox.py"]
+        E[".env"]
     end
 
-    subgraph "核心服务"
-        FastAPI["FastAPI 应用<br/>api_utils/"]
-        BrowserOps["页面控制与自动化<br/>browser_utils/"]
-        StreamProxy["流式代理<br/>stream/"]
+    subgraph Core
+        F["FastAPI<br/>api_utils/"]
+        B["Page control<br/>browser_utils/"]
+        S["Stream proxy<br/>stream/"]
     end
 
-    subgraph "外部依赖"
-        Camoufox["Camoufox 浏览器"]
-        AIStudio["Google AI Studio"]
-    end
-
-    User --> Launcher
-    Launcher --> Env
-    WebUI --> FastAPI
-    APIClient --> FastAPI
-    FastAPI --> BrowserOps
-    FastAPI --> StreamProxy
-    BrowserOps --> Camoufox --> AIStudio
-    StreamProxy --> AIStudio
+    UI --> F
+    API --> F
+    L --> E --> F
+    F --> B
+    F --> S
+    B --> C["Camoufox"]
+    C --> G["Google AI Studio"]
+    S --> G
 ```
 
----
-
-## 运行模式
-
-| 命令 | 说明 | 场景 |
-| --- | --- | --- |
-| `python launch_camoufox.py --headless` | 无头模式 | 日常使用、服务器 |
-| `python launch_camoufox.py --debug` | 调试模式 | 首次认证、故障排查 |
-| `python launch_camoufox.py --virtual-display` | 虚拟显示 | Linux 无 GUI 环境 |
+A request is serialised by design: one browser, one chat, one lock. Two
+concurrent calls queue behind each other rather than interleaving keystrokes.
 
 ---
 
-## ⚙️ 配置
+## Known behaviour
 
-项目使用 `.env` 统一配置管理：
+- **One chat clear per tool turn.** Answering a tool call inside the same native
+  function-call turn makes the model re-issue the identical call, so the proxy
+  replays into a fresh chat instead. Correct, and ~5 s slower than the broken
+  fast path.
+- **Free-tier quota is the real limit.** Roughly 1 M tokens/day plus per-model
+  request buckets; the pinned model starts returning `429` when spent, and
+  recovers on its own.
+- **A force-killed session leaves a profile lock.** If the proxy is killed
+  mid-run, delete `%TEMP%\camoufox\parent.lock` before the next start, otherwise
+  Camoufox waits out its handshake timeout and dies with
+  `Failed to capture WebSocket endpoint`.
+- **`FUNCTION_CALLING_MODE=emulated` does not work with current models** — the
+  model answers in prose without emitting a call. Keep `auto`.
+
+---
+
+## Development
 
 ```bash
-cp .env.example .env
+ruff check .
+pytest
 ```
 
-核心配置示例：
-
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PORT` | `2048` | 主 API 端口 |
-| `STREAM_PORT` | `3120` | 流式代理端口（`0` 关闭） |
-| `UNIFIED_PROXY_CONFIG` | 空 | HTTP/HTTPS 代理 |
-| `AUTO_ROTATE_AUTH_PROFILE` | `true` | 认证自动轮转 |
-| `FUNCTION_CALLING_MODE` | `auto` | 函数调用模式 |
-
-详细项见：[配置参考](docs/configuration-reference.md)
-
-> 说明：配置默认值以 `.env.example` 为准；少数配置存在代码兜底默认值，详见配置参考中的说明。
-
----
-
-## 📚 文档
-
-- [文档总览](docs/README.md)
-- [快速开始](docs/quick-start.md)
-- [部署与运维指南](docs/deployment-and-operations.md)
-- [API 使用说明](docs/api-usage.md)
-- [函数调用模式](docs/function-calling.md)
-- [认证轮转与 Cookie 刷新](docs/auth-rotation-cookie-refresh.md)
-- [排障指南](docs/troubleshooting.md)
-- [开发、测试与发布](docs/development-and-release.md)
-- [多实例 Docker 管理器](scripts/multi-instance-manager/README.md)
-
----
-
-## 客户端配置示例
-
-以 Open WebUI 为例：
-
-1. 进入设置 -> 连接
-2. API Base URL 填 `http://127.0.0.1:2048/v1`
-3. 若你未配置 API Keys，可留空或填任意字符；若已配置，请填写有效 Key
-4. 保存后即可对话
-
----
-
-## 开发检查
-
-```bash
-poetry run ruff check .
-poetry run pyright
-poetry run pytest
-```
-
-前端构建：
+Frontend:
 
 ```bash
 cd static/frontend
-npm ci
-npm run build
+npm ci && npm run build
 ```
 
----
+## Credits
 
-## 致谢
+Upstream project and its authors — this fork would not exist without them:
 
-- **项目发起与主要开发**: [@CJackHwang](https://github.com/CJackHwang)
-- **核心维护**（架构重构、测试体系）: [@NikkeTryHard](https://github.com/NikkeTryHard)
-- **功能完善、页面操作优化**: [@ayuayue](https://github.com/ayuayue)
-- **实时流式功能优化**: [@luispater](https://github.com/luispater)
-- **项目重构贡献**: [@yattin](https://github.com/yattin)（Holt）
-- **下游维护分支致谢作者**: [@MasuRii](https://github.com/MasuRii)
-- **社区支持**: [Linux.do 社区](https://linux.do/)
+- **Creator and lead developer**: [@CJackHwang](https://github.com/CJackHwang)
+- **Core maintenance, architecture and test infrastructure**: [@NikkeTryHard](https://github.com/NikkeTryHard)
+- **Feature work and page automation**: [@ayuayue](https://github.com/ayuayue)
+- **Real-time streaming**: [@luispater](https://github.com/luispater)
+- **Refactor contributions**: [@yattin](https://github.com/yattin)
+- **Downstream maintenance**: [@MasuRii](https://github.com/MasuRii)
+- **Community**: [Linux.do](https://linux.do/)
+
+Fork maintenance: [@Kaiso-666](https://github.com/Kaiso-666).
 
 ## License
 
-[AGPLv3](LICENSE)
-
-## 支持作者
-
-如果本项目对你有帮助，欢迎支持作者持续开发：
-
-![支持作者](./支持作者.jpg)
+[AGPLv3](LICENSE) — inherited from upstream. If you run a modified version as a
+network service, the AGPL requires you to offer its source.
