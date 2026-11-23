@@ -58,6 +58,25 @@ async def chat_completions(
     if is_service_unavailable:
         raise service_unavailable(req_id)
 
+    # Admission control. The worker serialises to one browser context, so a
+    # queue deeper than a few turns only converts a fast 429 into a long hang
+    # the client has already abandoned by the time its turn starts. Rejecting
+    # early gives the harness a retryable signal instead of a mystery stall.
+    try:
+        max_depth = int(get_environment_variable("MAX_QUEUE_DEPTH", "3") or 0)
+    except (TypeError, ValueError):
+        max_depth = 3
+    depth = request_queue.qsize()
+    if max_depth > 0 and depth >= max_depth:
+        logger.warning(
+            f"[{req_id}] Rejecting request: queue depth {depth} >= {max_depth}."
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"[{req_id}] Proxy busy: {depth} requests already queued.",
+            headers={"Retry-After": "20"},
+        )
+
     result_future = Future()
     queue_item = {
         "req_id": req_id,

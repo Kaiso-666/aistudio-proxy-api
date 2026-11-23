@@ -349,3 +349,26 @@ call-id and argument-order churn, divergence still detected on a value change,
 CRLF folding, key stability across tool sets, and the eight validator cases
 (`n=1` and `presence_penalty=0` pass; `n=3`, `logprobs`, `top_logprobs`,
 `presence_penalty=0.5`, `frequency_penalty=1.2`, `parallel_tool_calls=false` reject).
+
+---
+
+## 10. Status — third pass
+
+Two liveness/back-pressure gaps that only show up under a real agent loop, where
+turns are short and frequent and the client has its own timeouts.
+
+| Change | Why |
+| --- | --- |
+| SSE comment frame (`: keepalive`) every 10 s of stream silence, streaming path only (`enable_keepalive` defaults False elsewhere) | a thinking phase can be silent for a minute; an empty body that long is indistinguishable from a dead connection, and any client or intermediary with a 30–60 s read timeout drops the turn. Comment frames are invisible to every SSE parser, so no chunk contract changes |
+| `MAX_QUEUE_DEPTH` admission control (default 3, 0 disables) → 429 + `Retry-After` before enqueue | the worker serialises to one browser context; a deep queue converts a fast retryable signal into a multi-minute stall whose client has already given up |
+
+Deliberately **not** added:
+
+- a role-only opening chunk. It is the OpenAI shape, but the current stream
+  already works with the target clients, and inserting a leading frame changes the
+  chunk contract for no measured gain — the existing generator tests assert the
+  first chunk is the first content delta, and they stay valid.
+- a stale-queue drop inside the worker. A request whose client vanished is
+  already rejected at dequeue by `_test_client_connection` (499), so an extra
+  age-based policy would only add a second, conflicting rule for the case where
+  the client is still there and merely patient.

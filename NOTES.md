@@ -25,6 +25,9 @@ overlappable, correct OpenAI surface, runnable without a browser.
   `tools_changed` surfaced in the session log line.
 - `models/chat.py` + `utils_ext/validation.py`: `n`/`logprobs`/`top_logprobs`/
   `presence_penalty`/`frequency_penalty` now 400 instead of being silently dropped.
+- `api_utils/utils_ext/stream.py` + `response_generators.py`: SSE comment keepalive
+  (`: keepalive`) every 10 s of silence, streaming path only.
+- `api_utils/routers/chat.py`: `MAX_QUEUE_DEPTH` admission control → 429 + Retry-After.
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint and
   validator behaviour exercised directly as pure functions (4 + 8 cases).
 

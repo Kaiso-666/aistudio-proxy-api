@@ -151,6 +151,11 @@ async def gen_sse_from_aux_stream(
 
     has_started_body = False
 
+    # Deliberate: no role-only opening chunk. The existing stream shape is
+    # already accepted by the clients this fork targets, and adding an extra
+    # leading frame changes the chunk contract for no measured gain. Liveness is
+    # handled with comment frames instead (see enable_keepalive below), which no
+    # SSE parser can observe.
     try:
         async for raw_data in use_stream_response(
             req_id,
@@ -159,9 +164,8 @@ async def gen_sse_from_aux_stream(
             page=page,
             check_client_disconnected=check_client_disconnected,
             enable_silence_detection=True,
+            enable_keepalive=True,
         ):
-            data_receiving = True
-
             if (
                 GlobalState.CURRENT_STREAM_REQ_ID
                 and GlobalState.CURRENT_STREAM_REQ_ID != req_id
@@ -240,6 +244,13 @@ async def gen_sse_from_aux_stream(
 
             if not isinstance(data, dict):
                 continue
+
+            if data.get("keepalive"):
+                # Comment frame: SSE parsers ignore it, idle read timeouts do not.
+                yield ": keepalive\n\n"
+                continue
+
+            data_receiving = True
 
             typed_data: Dict[str, Any] = cast(Dict[str, Any], data)
             reason = str(typed_data.get("reason", ""))

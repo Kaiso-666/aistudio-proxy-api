@@ -22,6 +22,7 @@ async def use_stream_response(
     check_client_disconnected: Optional[Callable] = None,
     stream_start_time: float = 0.0,
     enable_silence_detection: bool = True,
+    enable_keepalive: bool = False,
 ) -> AsyncGenerator[Any, None]:
     """Enhanced stream response handler with UI-based generation active checks."""
     from api_utils.server_state import state
@@ -87,6 +88,13 @@ async def use_stream_response(
     last_scroll_body_len = -1
     last_scroll_ts = 0.0
     SCROLL_MIN_INTERVAL_S = 0.4
+
+    # SSE liveness. A thinking phase can be silent for a minute; an empty body
+    # for that long is indistinguishable from a dead connection, and clients or
+    # intermediaries with a 30-60s read timeout drop the turn. A comment frame
+    # is invisible to every SSE parser and keeps the socket warm.
+    last_yield_ts = time.time()
+    KEEPALIVE_INTERVAL_S = 10.0
 
     async def check_ui_generation_active():
         if not page:
@@ -356,6 +364,7 @@ async def use_stream_response(
                             parsed_data["body"] = dom_text
                             accumulated_body = dom_text
 
+                    last_yield_ts = time.time()
                     yield parsed_data
                     if parsed_data.get("done") is True:
                         if (
@@ -462,6 +471,12 @@ async def use_stream_response(
                     if await check_ui_generation_active():
                         logger.info(f"[{req_id}] UI detected still generating...")
                     last_ui_check_time = empty_count
+                if (
+                    enable_keepalive
+                    and (time.time() - last_yield_ts) >= KEEPALIVE_INTERVAL_S
+                ):
+                    last_yield_ts = time.time()
+                    yield {"keepalive": True}
                 await asyncio.sleep(0.1)
                 continue
     except asyncio.CancelledError:
