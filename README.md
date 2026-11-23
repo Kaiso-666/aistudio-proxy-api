@@ -163,6 +163,10 @@ Everything lives in `.env`. The values that matter most:
 | `SESSION_CONTEXT_LIMIT_TOKENS` | `900000` | rotate the chat above this size |
 | `HUMAN_TYPE_MAX_CHARS` | `40` | longer prompts are inserted, not typed |
 | `CAMOUFOX_HUMANIZE_MAX_TIME` | `0.55` | cap on synthetic pointer travel per click |
+| `STREAM_INTERSTREAM_DELAY_S` | `0` | gap forced between back-to-back streaming turns (`0` = none) |
+| `MAX_QUEUE_DEPTH` | `3` | reject with `429` + `Retry-After` past this queue depth (`0` disables) |
+| `RPC_CAPTURE_LIMIT` | `25` | capture this many outgoing `GenerateContent` bodies to `logs/rpc/` (`0` disables) |
+| `TURN_TIMING` | `0` | one INFO line per turn: queue / prep / TTFB / generation / tail |
 
 Lower `SESSION_CONTEXT_LIMIT_TOKENS` (e.g. `150000`) to stretch a free-tier
 daily quota much further; every rotation costs one summarise + clear cycle.
@@ -170,11 +174,36 @@ daily quota much further; every rotation costs one summarise + clear cycle.
 Full reference: [docs/configuration-reference.md](docs/configuration-reference.md)
 (upstream docs — still accurate for shared settings).
 
+### Fields this transport cannot honour
+
+Returned as `400` with the reason, rather than accepted and ignored — a `200`
+for a request the proxy did not actually perform is worse than an error:
+
+| Field | Why |
+| --- | --- |
+| `n > 1` | one generation per turn |
+| `logprobs`, `top_logprobs` | the web client exposes no logit data |
+| `presence_penalty`, `frequency_penalty` | no penalty control exists in AI Studio; faking it via temperature would change the request |
+| `parallel_tool_calls: false` | the model decides how many calls to emit |
+
+`max_tokens`, `max_completion_tokens` and `max_output_tokens` are the same knob
+and are accepted interchangeably.
+
+### `/health`
+
+Besides readiness it reports `session` (reuse enabled, rotation limit, and per
+session turn/page counters — if this keeps saying `sessions: 0` an agent loop is
+paying a full transcript replay every turn) and `timing` (phase medians for the
+last 20 turns).
+
 ---
 
 ## What this fork changes
 
-Measured, not estimated. Details and evidence in `FORK-NOTES.md`.
+Measured, not estimated. Details and evidence in `FORK-NOTES.md`; the later work
+that is reasoned but not yet measured is kept separate, in
+[OPTIMIZATION.md](OPTIMIZATION.md), with the RPC plan in
+[docs/architecture/RPC-MODE.md](docs/architecture/RPC-MODE.md).
 
 | Area | Upstream | This fork |
 | --- | --- | --- |
