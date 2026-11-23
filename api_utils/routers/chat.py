@@ -19,6 +19,7 @@ from ..dependencies import (
     get_worker_task,
 )
 from ..error_utils import service_unavailable
+from .. import turn_timing
 
 
 async def chat_completions(
@@ -78,6 +79,7 @@ async def chat_completions(
         )
 
     result_future = Future()
+    turn_timing.begin(req_id)
     queue_item = {
         "req_id": req_id,
         "request_data": request,

@@ -14,7 +14,7 @@ async def health_check(
     worker_task=Depends(get_worker_task),
     request_queue: Queue = Depends(get_request_queue),
 ) -> JSONResponse:
-    from api_utils import chat_sessions
+    from api_utils import chat_sessions, turn_timing
 
     is_worker_running = bool(worker_task and not worker_task.done())
     launch_mode = get_environment_variable("LAUNCH_MODE", "unknown")
@@ -59,6 +59,9 @@ async def health_check(
             # number that explains an agent loop's token burn. Silently falling
             # back to full replay is otherwise invisible from the client side.
             "session": chat_sessions.stats(),
+            # Phase medians for the last 20 turns: queue wait, prep, TTFB,
+            # generation, and the serialised tail. Empty until turns complete.
+            "timing": turn_timing.summary(),
             "interstreamDelayS": get_environment_variable(
                 "STREAM_INTERSTREAM_DELAY_S", "0"
             ),

@@ -422,3 +422,36 @@ Reproduce:
 python3 -m pyflakes $(git ls-files '*.py' | grep -v '^tests/' | grep -v '^config/__init__.py')
 # remaining output is only "`global X` is unused" (mutation-only pattern) - no defects
 ```
+
+---
+
+## 12. Status — fifth pass: make §6 measurable
+
+Every remaining claim in this document is gated on one live run, and until now
+nothing in the codebase produced the numbers. `api_utils/turn_timing.py` does,
+behind `TURN_TIMING=1`, at five mark points that already existed as natural
+boundaries:
+
+| phase | marked at | answers |
+| --- | --- | --- |
+| `enqueue` → `dequeued` | handler entry → worker pickup | §1 step 8, admission control tuning |
+| `dequeued` → `submitted` | worker → prompt submitted | §1 steps 2–4: panel probes, prompt entry |
+| `submitted` → `first_byte` | submit → first stream item | TTFB, the number that decides RPC-vs-DOM urgency |
+| `first_byte` → `done` | first item → response complete | model time, i.e. the denominator for "overhead" |
+| `done` → `finish` | complete → post-turn work done | §1 steps 7 and the rotation cost |
+
+Design constraints, all deliberate:
+
+- `time.monotonic()`, so a clock jump cannot invent a negative phase.
+- Any phase may be missing (non-streaming has no TTFB); deltas appear only when
+  both ends exist, so the record is never a lie-by-zero.
+- The ring buffer (last 20) is always kept: `/health` reports phase medians even
+  when logging is off, so an incident does not require having predicted it.
+- `mark()` without `begin()` is tolerated and bounded (64 tracked turns), because
+  a cancelled or requeued turn can outlive its handler.
+- Nothing in the request path reads the numbers; a broken timing module cannot
+  fail a turn.
+
+With this, the §6 table stops being a guess: one capture run also yields the
+per-phase split, and any change in this document can be judged against the
+median rather than against the anecdote that motivated it.

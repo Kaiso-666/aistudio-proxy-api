@@ -23,7 +23,7 @@ async def queue_worker() -> None:
     """Queue worker, processes tasks in the request queue"""
     # Delayed imports to avoid circularity
     from api_utils.server_state import state
-    from api_utils import chat_sessions, session_rotation
+    from api_utils import chat_sessions, session_rotation, turn_timing
     from config import RESPONSE_COMPLETION_TIMEOUT, get_environment_variable
 
     # Inter-stream pacing, previously hard-coded to >=1s. Account quota is
@@ -202,6 +202,7 @@ async def queue_worker() -> None:
             request_data = request_item["request_data"]
             http_request = request_item["http_request"]
             result_future = request_item["result_future"]
+            turn_timing.mark(req_id, "dequeued")
 
             GlobalState.CURRENT_STREAM_REQ_ID = req_id
             logger.info(f"[{req_id}] (Worker) Processing request dequeued.")
@@ -355,6 +356,7 @@ async def queue_worker() -> None:
                             )
 
                         # Post-processing button handling
+                        turn_timing.mark(req_id, "done")
                         if client_disconnected_early:
                             if submit_btn_loc:
                                 try:
@@ -557,6 +559,7 @@ async def queue_worker() -> None:
                 else:
                     result_future.set_exception(server_error(req_id, f"Error: {e}"))
         finally:
+            turn_timing.finish(req_id, logger)
             if request_item:
                 request_queue.task_done()
 

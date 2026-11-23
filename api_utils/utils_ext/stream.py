@@ -8,6 +8,8 @@ from typing import Any, AsyncGenerator, Callable, List, Optional, Tuple
 from config.settings import FUNCTION_CALLING_DEBUG
 from logging_utils import set_request_id
 
+from .. import turn_timing
+
 # [REFAC-01] Structural Boundary Pattern
 TOOL_STRUCTURE_PATTERN = re.compile(
     r"(?:^|\n)\s*(?:```[a-zA-Z0-9]*\s*)?<[a-zA-Z0-9_\-]+(?:\s|>)"
@@ -199,6 +201,8 @@ async def use_stream_response(
                     break
 
                 empty_count = 0
+                if received_items_count == 0:
+                    turn_timing.mark(req_id, "first_byte")
                 received_items_count += 1
                 last_packet_time = time.time()
 

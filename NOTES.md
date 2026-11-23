@@ -32,12 +32,15 @@ overlappable, correct OpenAI surface, runnable without a browser.
   `localStorage.promptModel` on the new model → next page load booted into a model
   `state` did not believe in → later requests skipped switching and generated with
   the wrong model, silently. All three failure paths now restore the snapshot.
-- `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint and
-  validator behaviour exercised directly as pure functions (4 + 8 cases);
+- `api_utils/turn_timing.py`: per-turn phase timing (queue / prep / TTFB / gen / tail),
+  `TURN_TIMING=1` for a log line, medians always on `/health`.
+- `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
+  and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.
 
 ## Next
-1. Run once with `RPC_CAPTURE_LIMIT=1`, then
+1. One live run with `RPC_CAPTURE_LIMIT=1 TURN_TIMING=1`: the capture decides S1 vs S3,
+   the timing line replaces the estimates in `OPTIMIZATION.md` §6. Then
    `python3 tools/inspect_rpc_capture.py "logs/rpc/*.req" --leaves`.
 2. From that tree decide S1-full (in-page tee, per-request routing) vs S3 (direct RPC).
 3. Rotation: `rotation_candidate` triggers a *synchronous* summarisation turn inside a

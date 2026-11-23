@@ -49,7 +49,7 @@ from models import (
     QuotaExceededRetry,
 )
 
-from . import chat_sessions
+from . import chat_sessions, turn_timing
 from .client_connection import (
     check_client_connection as _check_client_connection,
 )
@@ -972,6 +972,8 @@ async def _process_request_refactored(
                 await page_controller.submit_prompt(
                     prepared_prompt, attachments_list, check_client_disconnected
                 )
+
+        turn_timing.mark(req_id, "submitted")
 
         # The turn is in flight. It is committed to the session only once the
         # worker confirms the response was fully captured; see queue_worker.
