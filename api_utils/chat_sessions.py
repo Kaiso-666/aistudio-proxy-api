@@ -26,7 +26,8 @@ tracked per session:
 On a new request:
 
   * derive a stable key from the conversation's leading context
-    (system prompt + first user message + model + tool signature),
+    (system prompt + first user message + model; the tool set is tracked but
+    not part of the key unless SESSION_KEY_INCLUDE_TOOLS asks for it),
   * if the stored fingerprints are a strict prefix of the incoming ones, submit
     only `messages[page_len:]` - the page already holds the rest,
   * otherwise replay everything into a cleared chat.
@@ -34,7 +35,9 @@ On a new request:
 The prefix test is what makes this safe. An agent that rewrites, truncates or
 reorders history fails the test and gets a full replay; it can never silently
 inherit a chat whose contents have diverged. Delta is used only when provably a
-continuation.
+continuation. Fingerprints are normalised first (canonical JSON for tool-call
+arguments, tool ids ignored, CRLF folded) so that a client re-serialising its own
+history cannot fail a test that only exists to catch semantic divergence.
 
 Rotation
 --------
@@ -69,6 +72,16 @@ CONTEXT_LIMIT_TOKENS = int(
     os.environ.get("SESSION_CONTEXT_LIMIT_TOKENS", "900000") or 900000
 )
 CHARS_PER_TOKEN = float(os.environ.get("SESSION_CHARS_PER_TOKEN", "3.5") or 3.5)
+
+# Whether the tool declaration set is part of the conversation key. It should
+# not be: an agent that discovers a tool, or whose per-turn tool list varies,
+# would otherwise be handed a brand-new key and a full transcript replay. The
+# function-calling orchestrator re-applies declarations per request and
+# invalidates its own cache on change, so the page never inherits stale tools.
+# Set to true to restore the previous behaviour.
+KEY_INCLUDES_TOOLS = os.environ.get(
+    "SESSION_KEY_INCLUDE_TOOLS", "false"
+).strip().lower() in ("1", "true", "yes", "on", "y")
 
 HANDOFF_PREFIX = (
     "[CONTEXT HANDOFF]\n"
@@ -141,6 +154,7 @@ class Resolution:
     rotation_due: bool = False
     page_tokens: int = 0
     est_tokens: int = 0
+    tools_changed: bool = False
 
 
 @dataclass
@@ -165,32 +179,68 @@ _page_dirty: bool = False
 # --- helpers ---------------------------------------------------------------
 
 
+def _canonical_arguments(raw: Any) -> str:
+    """Canonical form of a tool-call argument payload.
+
+    Adapters routinely re-serialise arguments (key order, spacing) between
+    turns, and some regenerate tool-call ids. Neither changes what the model
+    saw, but both used to change the fingerprint, fail the prefix test and force
+    a full transcript replay - the O(n^2) path this module exists to avoid.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        text = raw.strip()
+        try:
+            return json.dumps(
+                json.loads(text), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        except Exception:
+            return text
+    try:
+        return json.dumps(
+            raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+        )
+    except Exception:
+        return str(raw)
+
+
+def _normalise_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        # CRLF vs LF is invisible to the model (the page normalises on entry),
+        # so it must not be able to invalidate a session.
+        return content.replace("\r\n", "\n").strip()
+    try:
+        return json.dumps(content, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return str(content)
+
+
 def _content_signature(message: Any) -> str:
     """Stable hash of everything that affects what the model sees in a turn."""
     role = getattr(message, "role", "") or ""
     content = getattr(message, "content", None)
     tool_calls = getattr(message, "tool_calls", None)
-    parts = [role]
-
-    if isinstance(content, str):
-        parts.append(content)
-    elif content is None:
-        parts.append("")
-    else:
-        try:
-            parts.append(
-                json.dumps(content, sort_keys=True, ensure_ascii=False, default=str)
-            )
-        except Exception:
-            parts.append(str(content))
+    parts = [role, _normalise_content(content)]
 
     if tool_calls:
-        try:
-            parts.append(
-                json.dumps(tool_calls, sort_keys=True, ensure_ascii=False, default=str)
-            )
-        except Exception:
-            parts.append(str(tool_calls))
+        # The call id and the `type: "function"` discriminator are transport
+        # bookkeeping - the page never sees them, so they must not count.
+        normalised = []
+        for call in tool_calls:
+            if isinstance(call, dict):
+                function = call.get("function") or {}
+                name = function.get("name")
+                arguments = function.get("arguments")
+            else:
+                function = getattr(call, "function", None)
+                name = getattr(function, "name", None)
+                arguments = getattr(function, "arguments", None)
+            normalised.append([name or "", _canonical_arguments(arguments)])
+        parts.append(json.dumps(normalised, ensure_ascii=False))
 
     digest = hashlib.sha256("\x00".join(parts).encode("utf-8", "replace")).hexdigest()
     return digest[:32]
@@ -232,7 +282,9 @@ def _derive_key(messages: Sequence[Any], model: str, tools_hash: str) -> Optiona
         return None
     head.append(_content_signature(first_user))
 
-    blob = "\x00".join(head + [model or "", tools_hash])
+    blob = "\x00".join(head + [model or ""])
+    if KEY_INCLUDES_TOOLS:
+        blob += "\x00" + tools_hash
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:24]
 
 
@@ -306,7 +358,13 @@ def resolve(req_id: str, messages: Sequence[Any], model: str, tools) -> Resoluti
     session = _sessions.get(key)
     fps = _fingerprints(messages)
 
-    if session is None or session.model != model or session.tools_hash != tools_h:
+    if session is None or session.model != model:
+        full_replay.key = key
+        return full_replay
+
+    tools_changed = session.tools_hash != tools_h
+    if KEY_INCLUDES_TOOLS and tools_changed:
+        # Opt-in strictness: a changed declaration set starts a new chat.
         full_replay.key = key
         return full_replay
 
@@ -358,6 +416,7 @@ def resolve(req_id: str, messages: Sequence[Any], model: str, tools) -> Resoluti
         rotation_due=page_tokens >= CONTEXT_LIMIT_TOKENS,
         page_tokens=page_tokens,
         est_tokens=est,
+        tools_changed=tools_changed,
     )
 
 

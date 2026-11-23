@@ -96,7 +96,7 @@ from .utils_ext.function_calling_orchestrator import (
 from .utils_ext.stream import use_stream_response
 from .utils_ext.tokens import calculate_usage_stats
 from .utils_ext.usage_tracker import increment_profile_usage
-from .utils_ext.validation import validate_chat_request
+from .utils_ext.validation import validate_chat_request, validate_supported_features
 
 _initialize_request_context = _init_request_context
 
@@ -171,6 +171,11 @@ async def _prepare_and_validate_request(
         validate_chat_request(request.messages, req_id)
     except ValueError as e:
         raise bad_request(req_id, f"Invalid request: {e}")
+
+    try:
+        validate_supported_features(request, req_id)
+    except ValueError as e:
+        raise bad_request(req_id, f"Unsupported request: {e}")
 
     # When the page already holds the earlier turns, only the tail is serialised.
     prompt_messages = (
@@ -839,7 +844,8 @@ async def _process_request_refactored(
         logger.info(
             f"[{req_id}] [Session] mode={resolution.mode} "
             f"submit_msgs={len(resolution.messages)}/{len(request.messages)} "
-            f"page~{resolution.page_tokens}tok"
+            f"page~{resolution.page_tokens}tok "
+            f"tools={'changed' if resolution.tools_changed else 'same'}"
         )
 
         # --- Native Function Calling Setup (Phase 3) ---

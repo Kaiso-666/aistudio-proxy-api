@@ -96,3 +96,12 @@ class ChatCompletionRequest(BaseModel):
     # MCP per-request endpoint (optional), used for tool calling fallback to MCP service
     mcp_endpoint: Optional[str] = None
     parallel_tool_calls: Optional[bool] = True
+    # Declared so they can be *validated* rather than silently swallowed by
+    # pydantic. The transport cannot honour them (single generation, no logit
+    # access, no penalty knobs in the AI Studio panel), and a 200 for a request
+    # the proxy did not actually perform is the worst compatibility behaviour.
+    n: Optional[int] = 1
+    logprobs: Optional[bool] = False
+    top_logprobs: Optional[int] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None

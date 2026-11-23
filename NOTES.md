@@ -20,12 +20,21 @@ overlappable, correct OpenAI surface, runnable without a browser.
 - `stream/interceptors.py` + `stream/proxy_server.py`: capture `GenerateContent` request
   bodies to `logs/rpc/` (`RPC_CAPTURE_LIMIT`, default 25, 0 disables).
 - `tools/inspect_rpc_capture.py`: offline capture decoder (validated on a synthetic body).
-- `CHECK: python3 -m py_compile` on all edited modules → pass.
+- `api_utils/chat_sessions.py`: fingerprints ignore tool-call ids/type and canonicalise
+  arguments; tool set out of the session key (`SESSION_KEY_INCLUDE_TOOLS` to restore);
+  `tools_changed` surfaced in the session log line.
+- `models/chat.py` + `utils_ext/validation.py`: `n`/`logprobs`/`top_logprobs`/
+  `presence_penalty`/`frequency_penalty` now 400 instead of being silently dropped.
+- `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint and
+  validator behaviour exercised directly as pure functions (4 + 8 cases).
 
 ## Next
 1. Run once with `RPC_CAPTURE_LIMIT=1`, then
    `python3 tools/inspect_rpc_capture.py "logs/rpc/*.req" --leaves`.
 2. From that tree decide S1-full (in-page tee, per-request routing) vs S3 (direct RPC).
-3. Independent of that decision: `chat_sessions` key — drop `tools_hash`, add
-   longest-common-suffix alignment instead of strict-prefix-or-replay.
-4. Delete: `ensure_generation_stopped` (dead), MITM child process once RPC mode holds.
+3. Rotation: `rotation_candidate` triggers a *synchronous* summarisation turn inside a
+   client request. Speculative handoff (summarise at 0.75x limit, during idle) is the
+   next structural win; `apply_rotation` is already idempotent enough to accept a
+   precomputed summary.
+4. Delete: `ensure_generation_stopped` (dead in production but owned by its unit tests —
+   remove both deliberately), MITM child process once RPC mode holds.

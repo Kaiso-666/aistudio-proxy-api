@@ -329,3 +329,23 @@ own tests — 28 lines that can go, and the 0.5 s sleep inside it is unreachable
 
 Verification: `python3 -m py_compile` on all edited modules passes. Behavioural
 verification is deliberately absent — see the preamble.
+
+---
+
+## 9. Status — second pass
+
+The DOM-side counterpart of the RPC argument: if a turn is going to reuse a loaded
+chat, the decision must not be thrown away by bookkeeping.
+
+| Change | Why |
+| --- | --- |
+| tool-call ids and `type` excluded from message fingerprints; arguments canonicalised (sorted keys, compact separators); CRLF folded into LF | an adapter that re-serialises its own history (or renumbers call ids) used to fail the prefix test and force a full transcript replay — the O(n²) path `chat_sessions` exists to prevent |
+| tool set removed from the session key (`SESSION_KEY_INCLUDE_TOOLS=false`, opt-in to restore) | any per-turn change to the tool list created a new key and a full replay; declarations are re-applied per request and the function-calling cache already invalidates on change, so the page cannot inherit stale tools |
+| `tools_changed` carried on `Resolution` and logged in the session line | a silent declaration switch was indistinguishable from a normal reuse |
+| `n`, `logprobs`, `top_logprobs`, `presence_penalty`, `frequency_penalty` accepted by the model and **rejected** with 400 when set | pydantic was dropping them, so clients got a 200 for a request the transport did not perform; `parallel_tool_calls=false` is rejected for the same reason |
+
+Checks actually exercised (pure functions, no proxy): fingerprint stability under
+call-id and argument-order churn, divergence still detected on a value change,
+CRLF folding, key stability across tool sets, and the eight validator cases
+(`n=1` and `presence_penalty=0` pass; `n=3`, `logprobs`, `top_logprobs`,
+`presence_penalty=0.5`, `frequency_penalty=1.2`, `parallel_tool_calls=false` reject).
