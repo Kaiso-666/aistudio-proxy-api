@@ -22,7 +22,7 @@ from models import (
 
 from .common_utils import random_id
 from .sse import generate_sse_chunk, generate_sse_stop_chunk
-from .utils_ext.stream import use_stream_response
+from .utils_ext.stream import CONTROL_REASONS, use_stream_response
 from .utils_ext.tokens import calculate_usage_stats
 
 # Pattern to strip emulated function call text from body content
@@ -253,7 +253,9 @@ async def gen_sse_from_aux_stream(
             data_receiving = True
 
             typed_data: Dict[str, Any] = cast(Dict[str, Any], data)
-            reason = str(typed_data.get("reason", ""))
+            reason_raw = str(typed_data.get("reason", ""))
+            stop_reason = reason_raw if reason_raw in CONTROL_REASONS else ""
+            reason = "" if stop_reason else reason_raw
             body = _clean_body_text(str(typed_data.get("body", "")))
             done = bool(typed_data.get("done", False))
             function = cast(List[Any], typed_data.get("function", []))
@@ -361,9 +363,12 @@ async def gen_sse_from_aux_stream(
                     and not is_recovering
                     and not is_quota_exceeded
                     and not function
+                    and not stop_reason
                 ):
                     # Only show synthetic message when there's truly no content AND no function calls
                     # In native FC mode, empty body with function calls is expected
+                    # Not on a control stop: a truncated turn must not be dressed
+                    # up as "the model chose to say nothing".
                     fallback_text = (
                         "\n\n*(Model finished thinking but generated no output.)*"
                     )
@@ -417,7 +422,17 @@ async def gen_sse_from_aux_stream(
                         "finish_reason": None,
                     }
                 else:
-                    finish_reason = "stop"
+                    if stop_reason:
+                        # The transport, not the model, ended this turn. Report a
+                        # truncation: "stop" would tell the client the cut text is
+                        # a complete answer.
+                        finish_reason = "length"
+                        logger.warning(
+                            f"[{req_id}] Stream ended on {stop_reason}; "
+                            "reporting finish_reason=length."
+                        )
+                    else:
+                        finish_reason = "stop"
                     choice_item = {
                         "index": 0,
                         "delta": {},

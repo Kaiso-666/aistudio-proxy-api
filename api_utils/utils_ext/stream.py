@@ -10,6 +10,19 @@ from logging_utils import set_request_id
 
 from .. import turn_timing
 
+# `reason` carries reasoning text in data frames and a status token in control
+# frames (silence/timeout/zombie). A consumer that merges the two leaks internal
+# strings into `reasoning_content` and reports a truncated turn as complete.
+CONTROL_REASONS = frozenset(
+    {
+        "silence_detected",
+        "internal_timeout",
+        "hard_timeout",
+        "ttfb_timeout",
+        "zombie_stream_aborted",
+    }
+)
+
 # [REFAC-01] Structural Boundary Pattern
 TOOL_STRUCTURE_PATTERN = re.compile(
     r"(?:^|\n)\s*(?:```[a-zA-Z0-9]*\s*)?<[a-zA-Z0-9_\-]+(?:\s|>)"
@@ -408,6 +421,18 @@ async def use_stream_response(
                     and received_items_count >= min_items_before_silence_check
                     and time.time() - last_packet_time > silence_threshold
                 ):
+                    # A thinking model can be genuinely quiet for minutes. Ask
+                    # the page before declaring the stream dead: aborting a live
+                    # generation loses the rest of the answer and reports it as a
+                    # complete turn. The check is one locator probe per
+                    # threshold, not per tick.
+                    if await check_ui_generation_active():
+                        logger.info(
+                            f"[{req_id}] 🔇 Silent for {silence_threshold:.0f}s but "
+                            "the UI is still generating; continuing to wait."
+                        )
+                        last_packet_time = time.time()
+                        continue
                     logger.info(f"[{req_id}] 🔇 Stream silence detected.")
                     yield {
                         "done": True,

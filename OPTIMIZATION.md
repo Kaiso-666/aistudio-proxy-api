@@ -483,3 +483,40 @@ has the schema and is the right place to judge.
 Verified directly (pure functions, 6 fence cases): fenced JSON with and without
 a language tag unwraps; prose containing a fence, a `python` fence, plain JSON
 and an unclosed fence are all returned untouched.
+
+---
+
+## 14. Status — seventh pass: truncation was being reported as completion
+
+Three defects with one root cause: the stream dict uses `reason` for two
+different things — reasoning *text* in data frames, and a status token
+(`silence_detected`, `internal_timeout`, `hard_timeout`, `ttfb_timeout`,
+`zombie_stream_aborted`) in control frames.
+
+1. **Internal status strings leaked into `reasoning_content`.** The SSE
+   generator assigned `reason` straight into the reasoning latch, so a timeout
+   could emit `delta.reasoning_content: "silence_detected"` as if the model had
+   thought it.
+2. **A truncated turn was reported as `finish_reason: "stop"`.** An agent reading
+   that believes the cut text is a complete answer and keeps going on it. The
+   streaming path now maps every control stop to `finish_reason: "length"` and
+   logs which one; the non-streaming path raises for *any* control stop instead
+   of only `internal_timeout` (502 kept, so the existing contract and its test
+   stay valid).
+3. **The synthetic "model finished thinking but generated no output" message was
+   injected on truncation.** It turns "we lost the stream" into "the model chose
+   to say nothing" — the same class of lie. Suppressed when a control stop is
+   known.
+
+And the trigger itself was wrong in the common case: silence detection fired
+after `silence_threshold` (60 s default) **without asking the page**, so a
+high-thinking model that was quietly reasoning had its live generation aborted
+and the partial answer returned. The UI-active probe already existed — it was
+just evaluated after the abort. It now runs first (one locator probe per
+threshold, not per tick), resets the silence clock when generation is alive, and
+only then declares silence.
+
+Judgement call, stated: `length` for a transport-side truncation is the
+least-wrong standard value — it tells the client "this is cut", which is true,
+where `stop` tells it the opposite. A client that retries on `length` will redo
+the turn; a client that trusts `stop` will reason on half an answer.

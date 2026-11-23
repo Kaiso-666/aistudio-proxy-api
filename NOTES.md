@@ -37,6 +37,10 @@ overlappable, correct OpenAI surface, runnable without a browser.
 - `response_format`: was parsed, echoed in the response and ignored. Now translated
   into a `[RESPONSE FORMAT]` instruction at the top of the prompt, and a whole-response
   fence is unwrapped on the non-streaming paths. Instructed, not enforced.
+- truncation: silence detection now asks the page before aborting a live generation;
+  control stops no longer leak into `reasoning_content`; a cut turn reports
+  `finish_reason=length` instead of `stop`, and the non-streaming path raises 502 for
+  every control stop, not just `internal_timeout`.
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
   and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.

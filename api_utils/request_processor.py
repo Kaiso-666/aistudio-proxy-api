@@ -93,7 +93,7 @@ from .utils_ext.function_calling_orchestrator import (
     FunctionCallingState,
     get_function_calling_orchestrator,
 )
-from .utils_ext.stream import use_stream_response
+from .utils_ext.stream import CONTROL_REASONS, use_stream_response
 from .utils_ext.tokens import calculate_usage_stats
 from .utils_ext.usage_tracker import increment_profile_usage
 from .utils_ext.validation import validate_chat_request, validate_supported_features
@@ -390,16 +390,25 @@ async def _handle_auxiliary_stream_response(
                 functions = data.get("function")
                 break
 
-        if (
-            final_data_from_aux_stream
-            and final_data_from_aux_stream.get("reason") == "internal_timeout"
-        ):
+        control_reason = ""
+        if final_data_from_aux_stream:
+            candidate = str(final_data_from_aux_stream.get("reason") or "")
+            if candidate in CONTROL_REASONS:
+                control_reason = candidate
+        if control_reason:
             logger.error(
-                f"[{req_id}] Non-stream request failed via aux stream: Internal Timeout"
+                f"[{req_id}] Non-stream request ended without a completion: "
+                f"{control_reason}"
             )
+            # 502 keeps the existing contract for this path (the test suite and
+            # callers already treat it as a retryable upstream failure); the fix
+            # here is that *every* control stop is reported, not just one.
             raise HTTPException(
                 status_code=502,
-                detail=f"[{req_id}] Aux stream processing error (Internal Timeout)",
+                detail=(
+                    f"[{req_id}] Upstream did not complete the turn "
+                    f"({control_reason})."
+                ),
             )
 
         if (
