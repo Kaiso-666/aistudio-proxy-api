@@ -14,6 +14,8 @@ async def health_check(
     worker_task=Depends(get_worker_task),
     request_queue: Queue = Depends(get_request_queue),
 ) -> JSONResponse:
+    from api_utils import chat_sessions
+
     is_worker_running = bool(worker_task and not worker_task.done())
     launch_mode = get_environment_variable("LAUNCH_MODE", "unknown")
     browser_page_critical = launch_mode != "direct_debug_no_browser"
@@ -53,6 +55,13 @@ async def health_check(
             "queueLength": q_size,
             "launchMode": launch_mode,
             "browserAndPageCritical": browser_page_critical,
+            # Whether the loaded chat is actually being reused is the single
+            # number that explains an agent loop's token burn. Silently falling
+            # back to full replay is otherwise invisible from the client side.
+            "session": chat_sessions.stats(),
+            "interstreamDelayS": get_environment_variable(
+                "STREAM_INTERSTREAM_DELAY_S", "0"
+            ),
         },
     }
 
