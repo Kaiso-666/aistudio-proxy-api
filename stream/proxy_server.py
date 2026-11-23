@@ -336,6 +336,11 @@ class ProxyServer:
                         await server_writer.drain()
                         client_buffer.clear()
                     else:
+                        if should_sniff:
+                            # Post-header continuation of the GenerateContent
+                            # body currently being captured; the header branch
+                            # already wrote the first fragment.
+                            self.interceptor.append_capture(data)
                         server_writer.write(data)
                         await server_writer.drain()
                         client_buffer.clear()

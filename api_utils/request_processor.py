@@ -398,16 +398,20 @@ async def _handle_auxiliary_stream_response(
 
         model_name_for_json = current_ai_studio_model_id or MODEL_NAME
 
-        # Consolidate reasoning content with body content
-        consolidated_content = ""
-        if reasoning_content and reasoning_content.strip():
-            consolidated_content += reasoning_content.strip()
-        if content and content.strip():
-            if consolidated_content:
-                consolidated_content += "\n\n"
-            consolidated_content += content.strip()
+        # Reasoning is its own channel in the wire, and the streaming path
+        # already emits it as `delta.reasoning_content`. Folding it into
+        # `content` puts chain-of-thought into the transcript the model
+        # re-reads on the next turn, and clients that strip reasoning cannot.
+        body_content = (content or "").strip()
+        reasoning_text = (reasoning_content or "").strip()
+        consolidated_content = body_content
+        if not body_content and reasoning_text:
+            # Thinking-only turn: never return an empty assistant message.
+            consolidated_content = reasoning_text
 
         message_payload = {"role": "assistant", "content": consolidated_content}
+        if reasoning_text and body_content:
+            message_payload["reasoning_content"] = reasoning_text
         finish_reason_val = "stop"
 
         if functions and len(functions) > 0:
@@ -431,7 +435,7 @@ async def _handle_auxiliary_stream_response(
         usage_stats = calculate_usage_stats(
             [msg.model_dump() for msg in request.messages],
             consolidated_content or "",
-            "",
+            reasoning_text if body_content else "",
         )
 
         total_tokens = usage_stats.get("total_tokens", 0)
@@ -565,18 +569,19 @@ async def _handle_playwright_response(
                 f"[{req_id}] Successfully retrieved content directly ({len(final_content)} chars)"
             )
 
-        consolidated_content = ""
-        if reasoning_content and reasoning_content.strip():
-            consolidated_content += reasoning_content.strip()
-        if final_content and final_content.strip():
-            if consolidated_content:
-                consolidated_content += "\n\n"
-            consolidated_content += final_content.strip()
+        # Same reasoning channel rule as the aux-stream path: keep the model's
+        # thinking out of `content`, but never return an empty message when the
+        # turn produced nothing else.
+        body_content = (final_content or "").strip()
+        reasoning_text = (reasoning_content or "").strip()
+        consolidated_content = body_content
+        if not body_content and reasoning_text:
+            consolidated_content = reasoning_text
 
         usage_stats = calculate_usage_stats(
             [msg.model_dump() for msg in request.messages],
             consolidated_content,
-            "",
+            reasoning_text if body_content else "",
         )
         logger.info(f"[{req_id}] Token usage stats: {usage_stats}")
 
@@ -607,6 +612,8 @@ async def _handle_playwright_response(
             )
         else:
             message_payload = {"role": "assistant", "content": consolidated_content}
+            if reasoning_text and body_content:
+                message_payload["reasoning_content"] = reasoning_text
             finish_reason_val = "stop"
 
         response_payload = build_chat_completion_response_json(

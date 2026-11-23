@@ -24,7 +24,17 @@ async def queue_worker() -> None:
     # Delayed imports to avoid circularity
     from api_utils.server_state import state
     from api_utils import chat_sessions, session_rotation
-    from config import RESPONSE_COMPLETION_TIMEOUT
+    from config import RESPONSE_COMPLETION_TIMEOUT, get_environment_variable
+
+    # Inter-stream pacing, previously hard-coded to >=1s. Account quota is
+    # enforced over minute-scale windows, so a one-second sleep buys nothing
+    # on the limiter and is pure serialised latency in an agent tool loop.
+    try:
+        interstream_delay_s = float(
+            get_environment_variable("STREAM_INTERSTREAM_DELAY_S", "0") or 0
+        )
+    except (TypeError, ValueError):
+        interstream_delay_s = 0.0
 
     logger = state.logger
     request_queue = state.request_queue
@@ -221,15 +231,20 @@ async def queue_worker() -> None:
                 request_queue.task_done()
                 continue
 
-            # Streaming delay
+            # Streaming delay (adaptive, opt-in)
             current_time = time.time()
             if (
-                was_last_request_streaming
+                interstream_delay_s > 0
+                and was_last_request_streaming
                 and is_streaming_request
-                and (current_time - last_request_completion_time < 1.0)
+                and (current_time - last_request_completion_time < interstream_delay_s)
             ):
                 await asyncio.sleep(
-                    max(0.5, 1.0 - (current_time - last_request_completion_time))
+                    max(
+                        0.05,
+                        interstream_delay_s
+                        - (current_time - last_request_completion_time),
+                    )
                 )
 
             # Wait for lock
@@ -354,13 +369,43 @@ async def queue_worker() -> None:
                         ):
                             try:
                                 client_disco_checker("Post-stream check")
-                                await asyncio.sleep(0.5)
-                                client_disco_checker("Post-sleep check")
-                                if await submit_btn_loc.is_enabled(timeout=2000):
-                                    await submit_btn_loc.click(timeout=5000, force=True)
-                                await expect_async(submit_btn_loc).to_be_disabled(
-                                    timeout=10000
+                                # When the auxiliary stream already reported the
+                                # turn complete, the button is a sanity check -
+                                # not a reason to spend 0.5s plus a click-and-wait
+                                # on the critical path before the next request
+                                # dequeues. Only a still-enabled button (a missed
+                                # stop) is worth acting on.
+                                wire_done = (
+                                    isinstance(completion_event, dict)
+                                    or (
+                                        is_streaming_request
+                                        and isinstance(completion_event, Event)
+                                        and completion_event.is_set()
+                                    )
                                 )
+                                if wire_done:
+                                    try:
+                                        if await submit_btn_loc.is_enabled(
+                                            timeout=500
+                                        ):
+                                            await submit_btn_loc.click(
+                                                timeout=5000, force=True
+                                            )
+                                            await expect_async(
+                                                submit_btn_loc
+                                            ).to_be_disabled(timeout=3000)
+                                    except Exception:
+                                        pass
+                                else:
+                                    await asyncio.sleep(0.5)
+                                    client_disco_checker("Post-sleep check")
+                                    if await submit_btn_loc.is_enabled(timeout=2000):
+                                        await submit_btn_loc.click(
+                                            timeout=5000, force=True
+                                        )
+                                    await expect_async(submit_btn_loc).to_be_disabled(
+                                        timeout=10000
+                                    )
                             except ClientDisconnectedError:
                                 pass
                             except Exception:

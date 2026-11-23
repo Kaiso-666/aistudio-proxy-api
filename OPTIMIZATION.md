@@ -1,0 +1,331 @@
+# Optimisation analysis — aistudio-proxy-api
+
+Reasoning only: no code was executed, no browser launched, no benchmark run. Every
+claim below is either **derived from the source at the cited line** or explicitly
+marked *needs measurement* with the one probe that would settle it.
+
+## Verdict
+
+The proxy is not slow because Gemini is slow. It is slow because **every turn pays a
+fixed, serialised browser tax** — prompt entry, panel probes, post-turn button dance,
+an artificial inter-stream delay — and because **the browser is used as transport** when
+the project has already proven, in its own interceptor, that the wire format is readable
+and replayable.
+
+For a chat UI the fixed tax is noise next to 15–20 s of generation. For an agent harness
+(OpenCode, Cline, Open WebUI tool loops) it is the whole cost: tool turns generate for
+1–3 s and pay the same tax. So the objective is not "faster model", it is
+**overhead per turn → ~0** and **overlap of turns**.
+
+Best reachable target:
+
+| | now (code-derived) | after micro work | after RPC mode |
+| --- | --- | --- | --- |
+| fixed overhead / turn | 1.5–3 s serialised | 0.5–0.8 s | <150 ms |
+| TTFB | ~1.5–3 s | same | backend TTFB, 0.3–0.8 s |
+| concurrency | 1 (hard) | 1–2 tabs | rate-limit bound |
+| RAM | Camoufox (full Firefox) | same | ~120 MB, browser optional |
+| runs on Termux/ARM | no | no | yes |
+
+---
+
+## 1. Where the per-turn time actually goes
+
+Default path is the auxiliary stream (`STREAM_PORT=3120`), not DOM polling —
+`api_utils/request_processor.py:225-263`. That matters: the completion signal is a gRPC
+`done` frame, which is fast. The cost is everything *around* it.
+
+| # | Step | Evidence | Cost |
+| --- | --- | --- | --- |
+| 1 | `clear_stream_queue()` per request — drains a cross-process queue | `request_processor.py:770-790` | ~ms, but proves routing is global |
+| 2 | Model/param cache probes: `_ensure_advanced_settings_expanded` + `_ensure_tools_panel_expanded` on **every** request | `page_controller_modules/parameters.py:60,115,147` | 2–15 DOM round trips |
+| 3 | Prompt entry: focus click, `Ctrl+A`, `Delete`, jitter 80–300 ms, then typing or `insert_text`, then readback verify, then `data-value` write | `browser_utils/human_input.py:129-173`, `input.py:168-191` | 0.3–1.5 s |
+| 4 | Submit-button enable wait, click | `input.py:201-230` | 0.1–0.5 s |
+| 5 | Stream consumption: idle tick `sleep(0.1)` **plus a full-page scroll `evaluate` on every loop iteration** | `api_utils/utils_ext/stream.py:104-127` | ~10 page round trips/s for the whole generation |
+| 6 | Completion tail in aux path: on `done` with no body → 10×0.3 s DOM function-call retry; thinking-only → 20×0.5 s DOM wait | `stream.py:313-330`, `stream.py:352-366` | 0–3 s, 0–10 s |
+| 7 | Post-turn: `sleep(0.5)`, `is_enabled`, click stop, `to_be_disabled(10 s)` — **before the next request dequeues** | `queue_worker.py:351-372` | 0.6–1.5 s, serialised |
+| 8 | Artificial inter-stream delay: consecutive streaming requests held ≥1 s after the previous turn | `queue_worker.py:224-233` | 0.5–1.0 s, serialised |
+| 9 | Session bookkeeping: fingerprint whole transcript per turn | `api_utils/chat_sessions.py:199-247` | O(n) Python, small |
+
+Steps 7 and 8 are the ones that hurt twice: they block the **next** client request, not
+just the current one. On a 30-step agent loop they cost ~45 s of wall clock that is not
+model time.
+
+DOM fallback path (`STREAM_PORT=0`) is worse and should stay a fallback:
+`asyncio.sleep(0.5)` poll with 6–8 locator round trips per iteration including two
+`check_quota_limit` selectors (`browser_utils/operations.py:39-69,1273`), three
+consecutive confirmations (`operations.py:1256`), then extraction with three fixed 0.5 s
+sleeps in the copy-button route (`operations.py:1012,1041`).
+
+---
+
+## 2. Structural ceilings, ranked
+
+### S1 — The browser is transport. It does not have to be.
+
+The project already decodes the entire Gemini wire protocol: chunked + zlib +
+`GenerateContent` gRPC-web frames (`stream/interceptors.py:138-200`). It already proves
+in-process response surgery works, on the model-list endpoint
+(`browser_utils/initialization/network.py:15-68`, `context.route("**/*")`).
+
+What it does **not** do: keep the outgoing request body. `HttpInterceptor.process_request`
+(`stream/interceptors.py:99-136`) inspects only `jserror` and returns the body untouched.
+So the encoder reference is being thrown away every turn — a one-line dump would capture
+it.
+
+Consequence: `f.req` (urlencoded protobuf-ish array) + cookies + `at`/`f.sid` is
+replayable from `httpx`. The 5 k LOC of selector/typing/panel/scroll machinery exists to
+*produce* that body and to *guess* when the answer ended — the wire says both directly.
+
+Ladder:
+
+1. **Capture** (hours, zero risk): write `path`, headers, `f.req` for the first N
+   `GenerateContent` calls to `logs/rpc/`. Nothing else.
+2. **Encoder** (days): identify the stable array skeleton — model id, `generationConfig`
+   (temperature/topP/maxOutputTokens/thinkingConfig/responseSchema/stopSequences), tools,
+   `systemInstruction`, `contents[]`. The two opaque tokens refresh from the page
+   bootstrap; the browser stays alive only to mint them.
+3. **Client** (days): `httpx.AsyncClient(http2=True)` sending the reconstructed body,
+   reusing `HttpInterceptor.process_response`'s decoder unchanged. Browser becomes an
+   auth/fingerprint front and a fallback, not the request path.
+
+Effects: TTFB → backend; no tabs, no typing, no scroll, no button dance; concurrency
+limited only by account rate limits; **runs on this machine** (Termux/ARM cannot host
+Camoufox); images become `inlineData` parts instead of a file-upload dialog round trip;
+`responseSchema` and native `functionCall`/`functionResponse` parts become available,
+which is also the biggest *answer-quality* win available (see §3.7).
+
+Risk / kill criterion: token or anti-abuse drift. Keep `AI_STUDIO_RPC_MODE=dom` as a
+one-flag fallback and demote automatically if the RPC path returns 4xx above a threshold
+over a rolling window. That is a rate, not a guess — no test needed to design it.
+
+### S2 — One page, one queue, one slot
+
+`STREAM_QUEUE` is a single `multiprocessing.Queue` (`api_utils/server_state.py:51`) and
+routing is a single string, `GlobalState.CURRENT_STREAM_REQ_ID`
+(`config/global_state.py:62`); `reset_for_new_request` wipes state on each request
+(`interceptors.py:76-84`). Two concurrent turns would interleave frames and corrupt both.
+
+So: concurrency is 1 by construction, and a zombie stream aborts the *active* request
+(`stream.py:109-118`), while a TTFB timeout **reloads the page** (`stream.py:432-441`) —
+which would destroy every other slot's session if slots existed.
+
+Concurrency design that survives rate limits: slots = tabs, each owning its own chat,
+stream queue (per-request, not global) and cleanup. Start at 2, grow on clean-turn
+windows, shrink to 1 on the first 429/`PERMISSION_DENIED`. Under S3 this is free
+(one HTTP/2 client, N streams); under the browser it needs one tab per slot.
+
+Note: `route`-based interception is per-request by nature — one more reason S1's tee
+beats the MITM child, which is inherently global. The MITM also costs a child process, a
+CA cert, a second port, per-chunk pickling, and a logger that is documented as discarded
+(`interceptors.py:60-75`).
+
+### S3 — Session reuse is keyed on a hash of the whole history
+
+`chat_sessions.resolve` requires a **strict prefix** of message fingerprints
+(`chat_sessions.py:239,313`) and keys the session on `(model, tools_hash, prefix)`
+(`chat_sessions.py:203,213`). Two consequences:
+
+- Any client that rewrites history (compaction, summarisation, system-prompt edit) →
+  full replay of the transcript into the UI: O(n) tokens re-sent per turn, O(n²) over a
+  loop.
+- `tools_hash` in the key means **adding or removing one tool invalidates the session**.
+  Agent harnesses change tool sets constantly (MCP servers, per-turn tool availability).
+  This is a silent latency cliff.
+
+Best:
+
+- Accept explicit identity: `X-Session-Id` / `conversation_id`, plus
+  `previous_response_id` continuation. A client that says "same conversation" is
+  authoritative; stop guessing from content.
+- No id → longest-common-suffix alignment (`difflib.SequenceMatcher` over fingerprints)
+  and submit the divergent tail with a compaction marker, instead of all-or-nothing
+  prefix matching.
+- Drop `tools_hash` from the key. Tool declarations are request-scoped server state in
+  RPC mode; in DOM mode the function-calling cache already tracks declaration changes
+  (`utils_ext/function_calling_cache.py`) — double-counting it in the session key only
+  destroys good sessions.
+- System messages never belong in the fingerprint; they belong in `systemInstruction`,
+  which persists across the chat.
+
+### S4 — Rotation is a synchronous, lossy model call inside a client request
+
+At `SESSION_CONTEXT_LIMIT_TOKENS` (default 900 000) the turn becomes: summarise → clear →
+reseed with `[CONTEXT HANDOFF]`, paying a full generation on the client's clock.
+
+Best:
+
+- **Speculative handoff**: when `page_tokens > 0.75 × limit`, after the turn's response
+  is complete, spend *idle* time producing the summary in a side chat and store it as
+  `session.handoff`. Rotation then costs only clear + seed (sub-second), no model call.
+- **Never rotate on a `tool` turn** — `force_tool_replay` (`request_processor.py:825`)
+  already clears the chat there, so that turn should be the rotation point, at zero cost.
+- With S2, rotate into a fresh tab: zero client-visible downtime.
+- **Fix the token estimate driving the decision.** `estimate_tokens` is chars/4 + CJK/1.5
+  (`utils_ext/tokens.py:4-19`), used both for rotation (`chat_sessions.py:249,346,449`)
+  and for reported usage. Code and JSON undercount by roughly 10–25 %, so "900 k" can be
+  1.1 M: the backend silently truncates and the agent loses context mid-run — the worst
+  failure class because nothing errors. The wire carries `usageMetadata`; use it.
+
+### S5 — Turn tail is serialised into the critical path
+
+`queue_worker.py:351-372` performs `sleep(0.5)` → `is_enabled` → click stop →
+`to_be_disabled(10 s)` before dequeuing the next request. In the aux-stream path the
+generation has already reported `done`; there is nothing to stop. Gate the block on
+"stream did not complete via wire", and reduce it to a single `is_enabled` probe with no
+sleep. Combined with removing the ≥1 s artificial inter-stream delay
+(`queue_worker.py:224-233`, replace with an adaptive token bucket driven by observed
+429/TTFB drift), this is −1.5–2.5 s of *serialised* time per turn.
+
+### S6 — Streaming loop burns a page round trip 10×/s and sniffs text it already has
+
+`stream.py:104-127` re-runs a three-`querySelector` scroll script on **every** loop
+iteration, including empty-queue iterations, for the entire generation. AI Studio
+auto-scrolls its own transcript; the explicit scroll is defence against a headless
+viewport that is usually invisible anyway. Throttle to "content length changed, max 2/s",
+or delete it and let `scrollIntoView` on the last turn happen once at `done`.
+
+Similarly, reasoning/body separation and tool-call detection are done by text heuristics
+(`TOOL_STRUCTURE_PATTERN`, `boundary_transitions`, accumulator diffing,
+`stream.py:16-19,190-260`) when the wire already labels `functionCall` parts and thinking
+channels. Keep the heuristics only for emulated mode; on the native path they add latency
+and introduce a whole defect class (a model that *writes* XML that looks like a call).
+
+---
+
+## 3. Correctness / compatibility defects that cost quality
+
+Speed is half of "best". These make the proxy a worse *model* than it is:
+
+1. **`max_tokens` is silently dropped.** `ChatCompletionRequest` declares
+   `max_output_tokens` and no `max_tokens`/`max_completion_tokens`
+   (`models/chat.py:72-89`); Pydantic ignores unknown fields, so every OpenAI client's
+   cap is discarded and `DEFAULT_MAX_OUTPUT_TOKENS` wins. Fix with `AliasChoices` and
+   enforce it; unbounded output in an agent loop is slower *and* less reliable.
+2. **`finish_reason` is never `length`** (`request_processor.py:411,610`). Clients cannot
+   distinguish truncation from completion, so a cut answer is treated as final.
+3. **Truncated tails poison the session.** DOM-mode stop sequences stop the UI, but
+   streamed output clipped by the proxy leaves the remainder in the tab while the client
+   believes the turn ended. Any cut must invalidate the session (or `drop_pending`).
+4. **Reasoning is concatenated into `content`** in the non-streaming aux path
+   (`request_processor.py:403-405`, and the DOM path at `569-571`). Chain-of-thought then
+   lives in the transcript the model re-reads next turn, and clients that strip
+   reasoning cannot. The streaming path already emits `reasoning_content` deltas
+   correctly (`response_generators.py:270`) — the two paths disagree, which is itself a
+   bug worth fixing by making the non-stream path match.
+5. **Usage is fabricated.** `calculate_usage_stats` (`utils_ext/tokens.py:21-40`)
+   concatenates `role: content` and divides by 4. This number is what rotation, profile
+   accounting and client-side context management all believe.
+6. **Unsupported knobs are ignored rather than rejected**: `n>1`, `logprobs`,
+   `presence_penalty`, `frequency_penalty`, `parallel_tool_calls=false`, `seed` (accepted,
+   echoed as 0 at `request_processor.py:619`). Silent acceptance is the worst
+   compatibility behaviour; return 400 (or implement via RPC `generationConfig`).
+7. **`response_format: json_schema` shapes the envelope only.** In RPC mode set
+   `responseMimeType: application/json` + `responseSchema`; then tool arguments are
+   schema-valid by construction and the emulated-JSON scaffold (and its repair heuristics)
+   can be deleted.
+8. **Tool results force a fresh chat** (`request_processor.py:819-833`,
+   `chat_sessions.force_tool_replay`) — chosen because AI Studio keeps the native turn
+   open behind an "Enter function response" widget. Correct today, but it means every
+   tool turn re-uploads the transcript. In RPC mode the `functionResponse` part is just
+   the next `contents[]` entry: native multi-turn tool use, no replay, no DOM widget.
+   This is the single biggest agent-loop win in the whole document.
+
+---
+
+## 4. Micro-optimisations (each a small, reversible diff)
+
+- `operations.py:1273` — replace the 0.5 s poll + 6–8 locator reads with one
+  `page.wait_for_function` (stop button absent ∧ input empty ∧ submit disabled), event
+  resolution instead of polling; keep a slow fallback tick. Removes both granularity and
+  round trips.
+- `operations.py:39-69` — quota selectors run every poll iteration; they only matter when
+  generation stops or an error overlay appears. Check once, plus once on state change.
+- `operations.py:1012,1041` — three fixed 0.5 s sleeps in the copy path. The click already
+  resolves when the handler runs; read the clipboard on the next tick. Edit→textarea stays
+  first (it already is).
+- `response.py:106-134` — `ensure_generation_stopped` sleeps 0.5 s then probes; skip
+  entirely when the wire reported `done`.
+- `stream.py:313-330,352-366` — the 3 s FC retry and 10 s thinking-only waits run on the
+  client's clock. Make them background: emit `done`, resolve the response, then reconcile.
+- `stream.py:432-441` — TTFB timeout reloads the page. Under any concurrency this is a
+  nuke. Scope the recovery to a fresh tab, never the live page.
+- `routers/chat.py:73` — a single 300 s + 120 s deadline per request. With one worker a hung turn
+  is a 7-minute outage. Enforce per-phase budgets: submit ≤10 s, TTFB ≤20 s, idle ≤60 s.
+- Startup 50–90 s: init is sequential; the geoip pre-flight is already bounded 15 s
+  (`FORK-NOTES.md §2.2`). Parallelise model-list fetch + page load + auth inject, and cache
+  `last_model_id` in `auth_profiles/metadata.json` to skip the probe on warm restarts.
+- `input.py:182-190` — the `data-value` autosize write is one round trip purely for
+  layout; skip when the wrapper is not visible.
+
+---
+
+## 5. Sequencing (value × certainty ÷ risk)
+
+Six months of evidence in `FORK-NOTES.md` says this project gets its wins from measured
+structural change, not from tuning. Order accordingly:
+
+1. **Day 1 (no risk, no browser needed to reason about):** §4 micro items 1–5, S5 gating,
+   §3.1/3.2/3.4/3.5. Everything here is a deletion or a constant; all reversible.
+2. **Day 2 (evidence harvest):** dump captured `GenerateContent` request bodies
+   (`interceptors.py:99-136`). This single artefact decides between S1-full and S3 — it
+   either shows an encoder that is trivially reconstructible or it does not. Do not start
+   either path before looking at it.
+3. **Week 1–2:** S3 ladder (capture → encoder → httpx client) behind
+   `AI_STUDIO_RPC_MODE`, DOM path untouched and default until RPC mode holds on
+   consecutive live turns.
+4. **Week 2–3:** S3-session identity + speculative rotation + real usage metadata.
+5. **Then delete:** MITM child process, DOM function-call parser (1 425 LOC), emulated
+   tool scaffold, clipboard extraction, scroll loop, `CURRENT_STREAM_REQ_ID`.
+
+Deliberate non-goal: rewriting the DOM path for concurrency (S2-full). If S3 lands, tab
+orchestration is throwaway work; if it does not, S2 is the fallback plan and is only worth
+it after the capture in step 2 tells you RPC mode is dead.
+
+---
+
+## 6. What is *not* established here
+
+These are derivations from code, not measurements. Each has a one-line settle:
+
+| claim | cheapest probe |
+| --- | --- |
+| typing path is 0.3–1.5 s | timestamp `insert_prompt_text` start/end for one turn |
+| post-turn dance costs 0.6–1.5 s | timestamp `queue_worker.py:351` → loop top |
+| scroll `evaluate` is load, not noise | count calls per turn, then disable and compare turn wall time |
+| wire carries `usageMetadata` | grep one captured frame for it |
+| `f.req` encoder is reconstructible | read the captured body once |
+| rotation is the dominant long-session cost | log rotation count and per-rotation seconds |
+
+## 7. Machine constraint, stated once
+
+This box is Termux/ARM: Camoufox (a glibc Firefox) cannot host here. Every browser-side
+item above must be edited here and validated on the Windows host. Only RPC mode (§2 S1)
+runs locally — which means, on this machine, the RPC ladder is not just the fastest path,
+it is the only path to a self-hosted, self-verifiable proxy.
+
+---
+
+## 8. Status — landed in this pass
+
+Everything below is a deletion, a constant, or an added guard; no control flow was
+redesigned, so the failure modes are the ones already in the code.
+
+| Change | File | Effect |
+| --- | --- | --- |
+| `max_tokens` / `max_completion_tokens` aliased onto `max_output_tokens` | `models/chat.py` | client generation caps are no longer silently dropped |
+| reasoning kept out of `content`, surfaced as `reasoning_content` (both paths), thinking-only still returns a non-empty message | `api_utils/request_processor.py` | chain-of-thought stops re-entering the transcript; non-stream/stream now agree |
+| inter-stream pacing configurable, default off | `api_utils/queue_worker.py`, `.env.example` | removes ≥1 s of serialised latency per consecutive streaming turn |
+| post-turn button dance skipped when the wire already reported `done` | `api_utils/queue_worker.py` | removes 0.5 s + click-and-wait from the critical path before the next request dequeues |
+| auto-scroll only when the transcript grew, max 2.5/s | `api_utils/utils_ext/stream.py` | ~10 page round trips/s → ≤2.5 |
+| quota probe throttled to 1 per 2 s per page | `browser_utils/operations.py` | 4 round trips/s → 0.5 during the completion poll |
+| copy-button fallback: 0.5 s sleeps → 0.1 s | `browser_utils/operations.py` | −1.2 s on the (rare) fallback extraction path |
+| `GenerateContent` request bodies captured to `logs/rpc/` | `stream/interceptors.py`, `stream/proxy_server.py` | produces the encoder reference S1/S3 depend on |
+| `tools/inspect_rpc_capture.py` | new | decodes a capture offline: rpcid envelope, embedded layers, model id, keys, tree |
+
+Dead code found while editing: `ResponseController.ensure_generation_stopped`
+(`browser_utils/page_controller_modules/response.py:106`) has no caller outside its
+own tests — 28 lines that can go, and the 0.5 s sleep inside it is unreachable.
+
+Verification: `python3 -m py_compile` on all edited modules passes. Behavioural
+verification is deliberately absent — see the preamble.

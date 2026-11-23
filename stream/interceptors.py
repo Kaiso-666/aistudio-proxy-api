@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -29,6 +30,11 @@ class HttpInterceptor:
         # Accumulate unique function calls across streaming chunks
         # Key: (function_name, params_hash) - Value: {"name": str, "params": dict}
         self._accumulated_function_calls: dict[tuple[str, str], dict] = {}
+        # [RPC-CAPTURE] state; see _capture_generate_request
+        self._capture_handle = None
+        self._capture_count = 0
+        self._capture_limit = None
+        self._capture_bytes = 0
         self.setup_logging()
 
     @staticmethod
@@ -71,6 +77,67 @@ class HttpInterceptor:
         except Exception:
             pass
 
+    def _close_capture(self) -> None:
+        try:
+            if self._capture_handle is not None:
+                self._capture_handle.close()
+        except Exception:
+            pass
+        finally:
+            self._capture_handle = None
+            self._capture_bytes = 0
+
+    def _capture_generate_request(
+        self, body: Union[int, bytes], host: str, path: str
+    ) -> None:
+        """Persist the outgoing GenerateContent body once per turn.
+
+        The proxy already decodes every response frame, but the *request* body
+        is the one artefact it throws away - and it is the only thing needed to
+        replay the RPC without a browser. Captures are opt-out
+        (RPC_CAPTURE_LIMIT=0) and capped at 25 turns / 256 KB each by default,
+        because they contain the raw prompt.
+        """
+        if "GenerateContent" not in path and "generateContent" not in path:
+            return
+        if self._capture_limit is None:
+            try:
+                self._capture_limit = int(os.environ.get("RPC_CAPTURE_LIMIT", "25") or 0)
+            except (TypeError, ValueError):
+                self._capture_limit = 0
+        if self._capture_limit <= 0 or self._capture_count >= self._capture_limit:
+            return
+        if not isinstance(body, (bytes, bytearray)):
+            return
+        try:
+            capture_dir = Path(self.log_dir) / "rpc"
+            capture_dir.mkdir(parents=True, exist_ok=True)
+            self._capture_count += 1
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            out = capture_dir / f"{stamp}-{self._capture_count:03d}.req"
+            handle = out.open("wb")
+            handle.write(f"POST {host}{path}\n".encode("utf-8"))
+            handle.write(bytes(body))
+            self._capture_handle = handle
+            self._capture_bytes = len(body)
+            self.logger.debug(f"[RPC-CAPTURE] {out} ({len(body)} bytes)")
+        except Exception:
+            self._close_capture()
+
+    def append_capture(self, data: bytes) -> None:
+        """Append a continuation body chunk to the active capture."""
+        handle = self._capture_handle
+        if handle is None or not data:
+            return
+        try:
+            if self._capture_bytes >= 256 * 1024:
+                self._close_capture()
+                return
+            handle.write(data)
+            self._capture_bytes += len(data)
+        except Exception:
+            self._close_capture()
+
     def reset_for_new_request(self) -> None:
         """Reset interceptor state for a new request.
 
@@ -80,6 +147,9 @@ class HttpInterceptor:
         """
         self.response_buffer = ""
         self._accumulated_function_calls.clear()
+        # A new GenerateContent turn is exactly the boundary of the previous
+        # capture: close it before the next one opens.
+        self._close_capture()
 
     @staticmethod
     def should_intercept(host: str, path: str):
@@ -107,6 +177,13 @@ class HttpInterceptor:
 
         # Log the request
         self.logger.debug(f"[Network] Intercepted request: {host}{path}")
+
+        # [RPC-CAPTURE] The outgoing GenerateContent body is the only part of
+        # the wire protocol this proxy never keeps: it is returned untouched
+        # below. That body is the encoder reference - without it there is no
+        # path from "browser is the transport" to "browser is an auth front".
+        # Bounded, best-effort, and never more than a few turns per process.
+        self._capture_generate_request(request_data, host, path)
 
         # Check for Quota Exceeded errors in jserror requests
         if "jserror" in path:

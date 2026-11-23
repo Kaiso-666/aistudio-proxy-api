@@ -35,12 +35,24 @@ from models import ClientDisconnectedError, QuotaExceededError
 
 logger = logging.getLogger("AIStudioProxyServer")
 
+# The completion poll runs every 0.5s; probing two quota selectors on each tick
+# is four page round trips per second for a condition that only changes when
+# generation stops. One probe per two seconds is enough to catch it.
+_QUOTA_PROBE_INTERVAL_S = 2.0
+_last_quota_probe: dict[int, float] = {}
+
 
 async def check_quota_limit(page: AsyncPage, req_id: str) -> None:
     """Check for blocking quota errors immediately."""
     # 1. Check Global State first
     if GlobalState.IS_QUOTA_EXCEEDED:
         raise QuotaExceededError("Global Quota Exceeded Flag is Active.")
+
+    page_key = id(page)
+    now = time.time()
+    if now - _last_quota_probe.get(page_key, 0.0) < _QUOTA_PROBE_INTERVAL_S:
+        return
+    _last_quota_probe[page_key] = now
 
     try:
         # 2. Check UI for Quota Error (New Selector)
@@ -983,7 +995,9 @@ async def get_response_via_copy_button(
         )
         await last_message_container.hover(timeout=CLICK_TIMEOUT_MS)
         check_client_disconnected("Copy Response - after hover: ")
-        await asyncio.sleep(0.5)
+        # The menu item is awaited explicitly below; this beat only lets the
+        # hover animation settle, so 0.1s is enough (was 0.5s).
+        await asyncio.sleep(0.1)
         check_client_disconnected("Copy Response - after hover delay: ")
         logger.info(f"[{req_id}]   - Hovered.")
 
@@ -1009,7 +1023,9 @@ async def get_response_via_copy_button(
             return None
 
         check_client_disconnected("Copy Response - after clicking more options: ")
-        await asyncio.sleep(0.5)
+        # `to_be_visible` on the menu item below is the real synchronisation
+        # point; this sleep only covers the menu's open animation.
+        await asyncio.sleep(0.1)
         check_client_disconnected(
             "Copy Response - after delay following more options click: "
         )
@@ -1038,7 +1054,9 @@ async def get_response_via_copy_button(
             return None
 
         check_client_disconnected("Copy Response - after clicking copy button: ")
-        await asyncio.sleep(0.5)
+        # The clipboard write happens inside the click handler; one short beat
+        # is enough to read it back (was 0.5s).
+        await asyncio.sleep(0.1)
         check_client_disconnected(
             "Copy Response - after delay following copy button click: "
         )

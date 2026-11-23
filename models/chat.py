@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 from config import MODEL_NAME
 
@@ -74,7 +74,16 @@ class ChatCompletionRequest(BaseModel):
     model: Optional[str] = MODEL_NAME
     stream: Optional[bool] = False
     temperature: Optional[float] = None
-    max_output_tokens: Optional[int] = None
+    # OpenAI clients send `max_tokens` (legacy) or `max_completion_tokens`
+    # (current SDKs) for the same knob. Pydantic drops unknown fields, so
+    # without these aliases every client's cap was silently discarded and
+    # DEFAULT_MAX_OUTPUT_TOKENS won - slower turns and undetected truncation.
+    max_output_tokens: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "max_output_tokens", "max_tokens", "max_completion_tokens"
+        ),
+    )
     stop: Optional[Union[str, List[str]]] = None
     top_p: Optional[float] = None
     reasoning_effort: Optional[Union[str, int]] = None

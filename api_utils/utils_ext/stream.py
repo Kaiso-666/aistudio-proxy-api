@@ -80,6 +80,14 @@ async def use_stream_response(
     last_packet_time = time.time()
     min_items_before_silence_check = 10
 
+    # Auto-scroll pacing: the transcript only needs re-pinning when it grew.
+    # The previous form ran three querySelectors plus scrollIntoView on every
+    # loop tick - about ten page round trips per second, for the whole
+    # generation, on a page that scrolls itself.
+    last_scroll_body_len = -1
+    last_scroll_ts = 0.0
+    SCROLL_MIN_INTERVAL_S = 0.4
+
     async def check_ui_generation_active():
         if not page:
             return False
@@ -115,7 +123,13 @@ async def use_stream_response(
                 }
                 return
 
-            if page:
+            scroll_due = page and (
+                len(accumulated_body) != last_scroll_body_len
+                and (time.time() - last_scroll_ts) >= SCROLL_MIN_INTERVAL_S
+            )
+            if scroll_due:
+                last_scroll_body_len = len(accumulated_body)
+                last_scroll_ts = time.time()
                 try:
                     await page.evaluate(
                         """([scrollSel, contentSel, lastTurnSel]) => {
