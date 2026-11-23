@@ -12,9 +12,9 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import re
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -56,8 +56,13 @@ async def main() -> int:
     )
     args = ap.parse_args()
 
-    out_png = Path(r"C:\Users\meow\AppData\Local\Temp\opencode\inspect.png")
-    out_html = Path(r"C:\Users\meow\AppData\Local\Temp\opencode\inspect.html")
+    # Artifacts go to the platform temp dir: a hard-coded path from the author's
+    # Windows box silently fails everywhere else, which is exactly the machine
+    # someone debugging an upstream UI change is unlikely to be on.
+    artifact_dir = Path(tempfile.gettempdir()) / "aistudio-inspect"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    out_png = artifact_dir / "inspect.png"
+    out_html = artifact_dir / "inspect.html"
 
     async with AsyncCamoufox(headless=True, locale="en-US", os="windows") as browser:
         context = await browser.new_context(storage_state=args.auth)

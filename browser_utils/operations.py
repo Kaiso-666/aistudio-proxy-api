@@ -154,8 +154,6 @@ async def _handle_model_list_response(response: Any):
     # Need access to global variables
     from api_utils.server_state import state
 
-    global_model_list_raw_json = state.global_model_list_raw_json  # noqa: F841
-    parsed_model_list = state.parsed_model_list  # noqa: F841
     model_list_fetch_event = state.model_list_fetch_event
     excluded_model_ids = state.excluded_model_ids
 
@@ -1137,8 +1135,6 @@ async def _wait_for_response_completion(
             logger.info(
                 f"[{req_id}] (WaitV3) Rotation detected - enforcing minimum timeout: {timeout_seconds:.2f}s"
             )
-
-    _timeout_ms = timeout_seconds * 1000
 
     logger.info(
         f"[{req_id}] (WaitV3) Waiting for response completion... (Dynamic Timeout: {timeout_seconds:.2f}s)"

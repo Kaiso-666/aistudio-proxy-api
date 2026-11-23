@@ -28,8 +28,13 @@ overlappable, correct OpenAI surface, runnable without a browser.
 - `api_utils/utils_ext/stream.py` + `response_generators.py`: SSE comment keepalive
   (`: keepalive`) every 10 s of silence, streaming path only.
 - `api_utils/routers/chat.py`: `MAX_QUEUE_DEPTH` admission control → 429 + Retry-After.
+- `browser_utils/models/switcher.py`: a failed model switch left
+  `localStorage.promptModel` on the new model → next page load booted into a model
+  `state` did not believe in → later requests skipped switching and generated with
+  the wrong model, silently. All three failure paths now restore the snapshot.
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint and
-  validator behaviour exercised directly as pure functions (4 + 8 cases).
+  validator behaviour exercised directly as pure functions (4 + 8 cases);
+  `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.
 
 ## Next
 1. Run once with `RPC_CAPTURE_LIMIT=1`, then

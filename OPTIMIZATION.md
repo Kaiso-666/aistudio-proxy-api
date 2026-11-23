@@ -372,3 +372,53 @@ Deliberately **not** added:
   already rejected at dequeue by `_test_client_connection` (499), so an extra
   age-based policy would only add a second, conflicting rule for the case where
   the client is still there and merely patient.
+
+---
+
+## 11. Status — fourth pass: static analysis over runtime guessing
+
+With no browser available, the honest way to find defects is a checker rather than
+more speculation. `pyflakes` over every non-test module: **no undefined names, no
+unused imports, no redefinitions**. Two real findings, one of them a silent
+correctness bug.
+
+### 11.1 A failed model switch poisons the next page load
+
+`switch_ai_studio_model` writes `localStorage.aiStudioUserPreference.promptModel`
+*before* navigating and verifying. Every failure path then returned `False`
+without undoing it:
+
+- page displayed a different model than requested,
+- AI Studio refused the localStorage change,
+- any exception during the switch.
+
+The caller restores `state.current_ai_studio_model_id` (`request_processor.py`,
+`_handle_model_switch_failure`), but storage now disagrees with that state. The
+next page load boots into the new model; the next request compares against the
+restored state, concludes "already at target", skips the switch and generates
+with the **wrong model** — with no error anywhere. The fossil of the intended fix
+was a dead local, `_original_prompt_model`, which pyflakes flagged.
+
+Now: `prefs_modified` tracks whether storage was touched, and all three failure
+paths call `_restore_previous_prefs(reason)`, which rewrites the original
+snapshot and logs what it restored and why. Cancellation is excluded on purpose —
+restoring during teardown can hang.
+
+### 11.2 Dead state that implied missing checks
+
+- `stream.py`: `_data_received` was set but never read; the actual TTFB guard is
+  `received_items_count == 0`. Removed, so the next reader is not misled into
+  thinking a second gate exists.
+- `operations.py`: `_timeout_ms` was computed and dropped (the loop uses
+  `current_timeout_seconds`), and two vestigial `state` reads existed only to
+  silence themselves with `# noqa`. Removed.
+- `tools/inspect_chat.py` wrote artifacts to `C:\Users\meow\...` — a path from the
+  author's box that silently fails on every other machine, including the one
+  likely to debug the next upstream UI change. Now `tempfile.gettempdir()/aistudio-inspect`.
+
+Reproduce:
+
+```
+python3 -m pyflakes $(git ls-files '*.py' | grep -v '^tests/' | grep -v '^config/__init__.py')
+# remaining output is only "`global X` is unused" (mutation-only pattern) - no defects
+```

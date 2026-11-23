@@ -23,7 +23,34 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
     logger.info(f"[Model] Switching to -> {model_id}")
     original_prefs_str: Optional[str] = None
     _original_prompt_model: Optional[str] = None
+    prefs_modified = False
     new_chat_url = f"https://{AI_STUDIO_URL_PATTERN}prompts/new_chat"
+
+    async def _restore_previous_prefs(reason: str) -> None:
+        """Put localStorage back after a failed switch.
+
+        Leaving `aiStudioUserPreference.promptModel` on the new model is not
+        harmless: the next page load boots into a model that
+        `state.current_ai_studio_model_id` does not believe in, so the next
+        request sees "already at target", skips switching, and generates with
+        the wrong model - silently. Restoring makes the next attempt start from
+        a known state.
+        """
+        if not prefs_modified or not original_prefs_str:
+            return
+        try:
+            await page.evaluate(
+                "(prefsStr) => localStorage.setItem('aiStudioUserPreference', prefsStr)",
+                original_prefs_str,
+            )
+            logger.warning(
+                f"[Model] Restored previous model preference "
+                f"({_original_prompt_model or 'unknown'}) after failed switch: {reason}"
+            )
+        except Exception as restore_err:
+            logger.error(
+                f"[Model] Could not restore previous model preference: {restore_err}"
+            )
 
     try:
         original_prefs_str = await page.evaluate(
@@ -62,6 +89,7 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
             f"[Model] Updating localStorage.promptModel: {current_prefs_for_modification.get('promptModel', 'unknown')} -> {full_model_path}"
         )
         current_prefs_for_modification["promptModel"] = full_model_path
+        prefs_modified = True
         await page.evaluate(
             "(prefsStr) => localStorage.setItem('aiStudioUserPreference', prefsStr)",
             json.dumps(current_prefs_for_modification),
@@ -194,15 +222,18 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
                 logger.error(
                     "Model switching failed because page displayed model does not match expectation (even if localStorage may have changed)."
                 )
+                await _restore_previous_prefs("page displayed a different model")
         else:
             logger.error(
                 f"AI Studio did not accept model change (localStorage). Expected='{full_model_path}', Actual='{final_prompt_model_in_storage or 'not set or invalid'}'."
             )
+            await _restore_previous_prefs("localStorage rejected the change")
 
     except asyncio.CancelledError:
         raise
     except Exception:
         logger.exception("Serious error occurred during model switching")
+        await _restore_previous_prefs("exception during switch")
         from browser_utils.operations import save_error_snapshot
 
         await save_error_snapshot(f"model_switch_error_{req_id}")
