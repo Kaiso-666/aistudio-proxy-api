@@ -22,6 +22,7 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
     """Switch AI Studio model"""
     logger.info(f"[Model] Switching to -> {model_id}")
     original_prefs_str: Optional[str] = None
+    prefs_snapshot: Optional[str] = None
     _original_prompt_model: Optional[str] = None
     prefs_modified = False
     new_chat_url = f"https://{AI_STUDIO_URL_PATTERN}prompts/new_chat"
@@ -36,13 +37,19 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
         the wrong model - silently. Restoring makes the next attempt start from
         a known state.
         """
-        if not prefs_modified or not original_prefs_str:
+        if not prefs_modified:
             return
         try:
-            await page.evaluate(
-                "(prefsStr) => localStorage.setItem('aiStudioUserPreference', prefsStr)",
-                original_prefs_str,
-            )
+            if prefs_snapshot is None:
+                # There was no key before, so the exact restore is to remove it.
+                await page.evaluate(
+                    "() => localStorage.removeItem('aiStudioUserPreference')"
+                )
+            else:
+                await page.evaluate(
+                    "(prefsStr) => localStorage.setItem('aiStudioUserPreference', prefsStr)",
+                    prefs_snapshot,
+                )
             logger.warning(
                 f"[Model] Restored previous model preference "
                 f"({_original_prompt_model or 'unknown'}) after failed switch: {reason}"
@@ -56,6 +63,9 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
         original_prefs_str = await page.evaluate(
             "() => localStorage.getItem('aiStudioUserPreference')"
         )
+        # Keep the raw snapshot even if it does not parse: an unparsable value is
+        # exactly the case where a failed switch most needs a byte-exact restore.
+        prefs_snapshot = original_prefs_str
         if original_prefs_str:
             try:
                 original_prefs_obj = json.loads(original_prefs_str)
