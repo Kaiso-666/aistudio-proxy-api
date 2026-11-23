@@ -66,7 +66,7 @@ async def chat_completions(
         max_depth = int(get_environment_variable("MAX_QUEUE_DEPTH", "3") or 0)
     except (TypeError, ValueError):
         max_depth = 3
-    depth = request_queue.qsize()
+    depth = request_queue.qsize() if request_queue else 0
     if max_depth > 0 and depth >= max_depth:
         logger.warning(
             f"[{req_id}] Rejecting request: queue depth {depth} >= {max_depth}."
