@@ -455,3 +455,31 @@ Design constraints, all deliberate:
 With this, the §6 table stops being a guess: one capture run also yields the
 per-phase split, and any change in this document can be judged against the
 median rather than against the anecdote that motivated it.
+
+---
+
+## 13. Status — sixth pass: structured output stops being a lie
+
+`response_format` was parsed, echoed back inside the response object
+(`response_payloads.py:37`), and otherwise ignored. That is worse than refusing
+it: the client sees its own request reflected in the reply and has every reason
+to believe the schema was applied. A non-streaming `json_schema` caller then
+gets prose, or gets JSON it never validated.
+
+There is no grammar-constrained decoding available — AI Studio's page cannot be
+told to decode against a schema — so the honest maximum is *instruction plus
+normalisation*:
+
+| step | where | effect |
+| --- | --- | --- |
+| prepend a `[RESPONSE FORMAT]` block, schema included, for `json_object` / `json_schema` | `utils_ext/prompts.py:build_structured_output_instruction`, prepended in `prepare_combined_prompt` | the model is actually told, including on tail-only (delta) submissions |
+| unwrap a whole-response ```json fence | `utils_ext/string_utils.py:strip_json_code_fence`, applied on both non-streaming paths | models fence JSON anyway; a strict parser then rejects a correct answer |
+| leave the streaming path alone | — | a fence already flushed cannot be retracted; buffering the head to detect one would add latency to every JSON stream, which is a worse trade than the fence itself |
+
+Deliberately not done: schema *validation* with a 400 on mismatch. Turning a
+soft failure into a hard one mid-agent-run costs the turn; the client already
+has the schema and is the right place to judge.
+
+Verified directly (pure functions, 6 fence cases): fenced JSON with and without
+a language tag unwraps; prose containing a fence, a `python` fence, plain JSON
+and an unclosed fence are all returned untouched.

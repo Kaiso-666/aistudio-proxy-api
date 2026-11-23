@@ -189,6 +189,14 @@ for a request the proxy did not actually perform is worse than an error:
 `max_tokens`, `max_completion_tokens` and `max_output_tokens` are the same knob
 and are accepted interchangeably.
 
+`response_format` is the one field handled rather than refused: the page cannot
+do grammar-constrained decoding, but it can be told, so `json_object` /
+`json_schema` is translated into an instruction block at the top of the prompt
+(schema included). A non-streaming reply that is nothing but a single ```json
+fence is unwrapped before it reaches the client, because a strict parser would
+otherwise reject a correct answer. It is *instructed*, not enforced: the
+streaming path cannot retract a fence it has already sent.
+
 ### `/health`
 
 Besides readiness it reports `session` (reuse enabled, rotation limit, and per

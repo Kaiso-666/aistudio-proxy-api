@@ -14,12 +14,52 @@ if TYPE_CHECKING:
     from api_utils.utils_ext.function_calling_orchestrator import FunctionCallingState
 
 
+def build_structured_output_instruction(response_format: Any) -> str:
+    """Instruction block for `response_format`, or "" when not applicable.
+
+    The transport has no grammar-constrained decoding: AI Studio's page cannot
+    be told "decode against this schema". What it can do is be *told*, which is
+    what every proxy over an unconstrained backend does. Without this the field
+    was echoed back to the client while being ignored - a client parsing the
+    reply had no reason to think the schema had not been applied.
+    """
+    if not isinstance(response_format, dict):
+        return ""
+    fmt_type = str(response_format.get("type") or "").strip().lower()
+    if fmt_type == "json_object":
+        return (
+            "[RESPONSE FORMAT]\n"
+            "Reply with a single valid JSON object and nothing else - no prose "
+            "before or after it, no markdown code fences.\n"
+        )
+    if fmt_type != "json_schema":
+        return ""
+
+    schema: Any = response_format.get("json_schema")
+    if isinstance(schema, dict):
+        # OpenAI nests it under `schema` inside the `json_schema` object.
+        schema = schema.get("schema", schema)
+    try:
+        schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        schema_text = str(schema)
+    if not schema_text or schema_text in ("{}", "null", '""'):
+        return ""
+    return (
+        "[RESPONSE FORMAT]\n"
+        "Reply with a single valid JSON value that conforms to the JSON Schema "
+        "below. Output only the JSON - no prose, no markdown code fences.\n"
+        "Schema:\n" + schema_text[:8000] + "\n"
+    )
+
+
 def prepare_combined_prompt(
     messages: List[Message],
     req_id: str,
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
     fc_state: Optional["FunctionCallingState"] = None,
+    response_format: Any = None,
 ) -> Tuple[str, List[str]]:
     """Prepare combined prompt"""
     logger = logging.getLogger("AIStudioProxyServer")
@@ -616,6 +656,11 @@ def prepare_combined_prompt(
             )
 
     final_prompt = "".join(combined_parts)
+    structured_instruction = build_structured_output_instruction(response_format)
+    if structured_instruction:
+        # Prepended, not appended: it has to survive a tail-only submission and
+        # it must be read before the content it constrains.
+        final_prompt = structured_instruction + "\n" + final_prompt
     if final_prompt:
         final_prompt += "\n"
 

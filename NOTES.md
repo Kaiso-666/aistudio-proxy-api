@@ -34,6 +34,9 @@ overlappable, correct OpenAI surface, runnable without a browser.
   the wrong model, silently. All three failure paths now restore the snapshot.
 - `api_utils/turn_timing.py`: per-turn phase timing (queue / prep / TTFB / gen / tail),
   `TURN_TIMING=1` for a log line, medians always on `/health`.
+- `response_format`: was parsed, echoed in the response and ignored. Now translated
+  into a `[RESPONSE FORMAT]` instruction at the top of the prompt, and a whole-response
+  fence is unwrapped on the non-streaming paths. Instructed, not enforced.
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
   and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.

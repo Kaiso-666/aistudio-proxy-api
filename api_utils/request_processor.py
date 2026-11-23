@@ -97,6 +97,7 @@ from .utils_ext.stream import use_stream_response
 from .utils_ext.tokens import calculate_usage_stats
 from .utils_ext.usage_tracker import increment_profile_usage
 from .utils_ext.validation import validate_chat_request, validate_supported_features
+from .utils_ext.string_utils import strip_json_code_fence
 
 _initialize_request_context = _init_request_context
 
@@ -159,6 +160,18 @@ async def _handle_parameter_cache(req_id: str, context: RequestContext) -> None:
     await ms_param_cache(req_id, context)
 
 
+def _wants_json_response(response_format: Any) -> bool:
+    """Whether the client asked for a JSON-shaped reply."""
+    if isinstance(response_format, str):
+        return response_format.strip().lower() in ("json_object", "json_schema")
+    if isinstance(response_format, dict):
+        return str(response_format.get("type") or "").strip().lower() in (
+            "json_object",
+            "json_schema",
+        )
+    return False
+
+
 async def _prepare_and_validate_request(
     req_id: str,
     request: ChatCompletionRequest,
@@ -188,6 +201,7 @@ async def _prepare_and_validate_request(
         getattr(request, "tools", None),
         getattr(request, "tool_choice", None),
         fc_state=fc_state,
+        response_format=getattr(request, "response_format", None),
     )
     # Active function execution based on tools/tool_choice (supports per-request MCP endpoints)
     try:
@@ -413,6 +427,11 @@ async def _handle_auxiliary_stream_response(
         if not body_content and reasoning_text:
             # Thinking-only turn: never return an empty assistant message.
             consolidated_content = reasoning_text
+        if body_content and _wants_json_response(
+            getattr(request, "response_format", None)
+        ):
+            body_content = strip_json_code_fence(body_content)
+            consolidated_content = body_content
 
         message_payload = {"role": "assistant", "content": consolidated_content}
         if reasoning_text and body_content:
@@ -582,6 +601,11 @@ async def _handle_playwright_response(
         consolidated_content = body_content
         if not body_content and reasoning_text:
             consolidated_content = reasoning_text
+        if body_content and _wants_json_response(
+            getattr(request, "response_format", None)
+        ):
+            body_content = strip_json_code_fence(body_content)
+            consolidated_content = body_content
 
         usage_stats = calculate_usage_stats(
             [msg.model_dump() for msg in request.messages],

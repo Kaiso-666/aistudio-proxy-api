@@ -4,6 +4,30 @@ from typing import List, Optional
 from models import Message
 
 
+def strip_json_code_fence(text: str) -> str:
+    """Unwrap a response that is nothing but one markdown fence.
+
+    Models asked for JSON frequently answer with ```json ... ``` anyway, and a
+    strict client parser then rejects a reply that was in fact correct. Only a
+    fence covering the whole text is stripped: a fence inside prose, or inside a
+    string value, must survive untouched.
+    """
+    if not text:
+        return text
+    stripped = text.strip()
+    if len(stripped) < 8 or not stripped.startswith("```") or not stripped.endswith("```"):
+        return text
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return text
+    header = stripped[3:first_newline].strip().lower()
+    if header and header not in ("json", "jsonc", "json5"):
+        # A fenced block in another language is not our payload.
+        return text
+    body = stripped[first_newline + 1 : -3]
+    return body.strip()
+
+
 def extract_json_from_text(text: str) -> Optional[str]:
     """Attempt to extract the first JSON object string from plain text."""
     if not text:
