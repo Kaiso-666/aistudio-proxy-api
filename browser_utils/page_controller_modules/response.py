@@ -34,6 +34,9 @@ class ResponseController(BaseController):
         """Retrieve response content."""
         set_request_id(self.req_id)
         self.logger.debug("[Response] Waiting for and retrieving response...")
+        # Assume complete until the poll says otherwise; an exception leaves the
+        # caller's decision to its own error handling.
+        self.completion_detected = True
 
         try:
             # Wait for response container
@@ -70,6 +73,10 @@ class ResponseController(BaseController):
                 prompt_length=prompt_length,
                 timeout=timeout,
             )
+            # Callers need to know whether this is a whole answer. A poll
+            # timeout returns whatever text exists, and reporting that as a
+            # normal completion is how a truncated turn becomes "stop".
+            self.completion_detected = bool(completion_detected)
 
             if not completion_detected:
                 self.logger.warning(
@@ -262,6 +269,7 @@ class ResponseController(BaseController):
             "has_function_calls": False,
             "function_calls": [],
             "raw_content": "",
+            "truncated": False,
         }
 
         try:
@@ -288,6 +296,8 @@ class ResponseController(BaseController):
                 result["content"] = text_content
             else:
                 result["content"] = raw_content
+
+            result["truncated"] = not getattr(self, "completion_detected", True)
 
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):

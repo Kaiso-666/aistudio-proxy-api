@@ -520,3 +520,59 @@ Judgement call, stated: `length` for a transport-side truncation is the
 least-wrong standard value — it tells the client "this is cut", which is true,
 where `stop` tells it the opposite. A client that retries on `length` will redo
 the turn; a client that trusts `stop` will reason on half an answer.
+
+---
+
+## 15. Status — eighth pass: tool turns, the fake DOM stream, and truncated DOM answers
+
+Four defects, all on paths that only a real loop exercises.
+
+### 15.1 Every function-call turn paid two seconds of dead time
+
+`gen_sse_from_aux_stream` guards an "empty answer might be a quota wall" probe
+with `done and not has_started_body and not recovering and not quota`. A native
+tool-call turn legitimately carries **no body text** — it is all in `function` —
+so every tool call ran a quota probe and then `await asyncio.sleep(2.0)` before
+finalising. Twenty tool calls, forty seconds of sleep, no content behind it.
+Guard extended with `and not function`: an empty *text* answer still gets the
+probe, an empty-and-callable turn no longer does.
+
+### 15.2 The DOM "stream" was collect-then-replay at 166 characters/second
+
+`gen_sse_from_playwright` waits for the complete answer (`get_response_with_
+function_calls`), then emits it in 5-character chunks with `sleep(0.03)` — a
+3 kB answer became ~600 chunks and **~18 seconds of artificial replay** on top of
+the generation it had already waited for. Now 512-character blocks with no
+pacing: the content already exists, and chunking was only ever about write size.
+
+Note what this does *not* fix: this path still has TTFB = full generation time.
+Real incremental streaming on the DOM path needs per-tick text polling, which is
+a different (and unverifiable-here) change. The aux path is the streaming path;
+this one is a fallback and now at least stops adding latency to itself.
+
+### 15.3 The DOM path computed "did it finish?" and threw the answer away
+
+`ResponseController.get_response` already calls `_wait_for_response_completion`
+and gets a boolean, then returns only the text. A poll timeout therefore produced
+`finish_reason: "stop"` on a partial answer — the same lie fixed for the aux path
+in §14, still live on the fallback.
+
+`completion_detected` is now recorded on the controller, copied into both result
+dicts as `truncated`, and consumed:
+
+- non-streaming: `finish_reason: "length"` plus a warning;
+- streaming DOM: the stop chunk reports `length`;
+- both invalidate the session.
+
+### 15.4 A truncated turn must not keep its session
+
+If the client received less than the page holds, the page transcript is no longer
+the transcript the client will send back. The next delta would submit the
+client's truncated copy of a reply the model already has in full. Both transports
+now invalidate the session on a truncating stop, so the next turn replays into a
+cleared chat.
+
+`zombie_stream_aborted` is deliberately excluded from that set: it means *another*
+request has taken the page over, and invalidating the active session would
+destroy its successor. It still reports `finish_reason: "length"` to its own
+client, because that client's answer really was cut.

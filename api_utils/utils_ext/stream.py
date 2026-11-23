@@ -23,6 +23,13 @@ CONTROL_REASONS = frozenset(
     }
 )
 
+# Subset where *this* turn died and the page's state is therefore unknown. A
+# zombie abort is excluded on purpose: another request has already taken the
+# page over, so invalidating the active session would destroy its successor.
+TRUNCATED_REASONS = frozenset(
+    {"silence_detected", "internal_timeout", "hard_timeout", "ttfb_timeout"}
+)
+
 # [REFAC-01] Structural Boundary Pattern
 TOOL_STRUCTURE_PATTERN = re.compile(
     r"(?:^|\n)\s*(?:```[a-zA-Z0-9]*\s*)?<[a-zA-Z0-9_\-]+(?:\s|>)"

@@ -448,6 +448,7 @@ class PageController(
             "recovery_method": "direct",
             "has_function_calls": has_fc,
             "function_calls": function_calls,
+            "truncated": not getattr(self, "completion_detected", True),
         }
 
         if has_fc:

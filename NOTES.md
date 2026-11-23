@@ -40,7 +40,12 @@ overlappable, correct OpenAI surface, runnable without a browser.
 - truncation: silence detection now asks the page before aborting a live generation;
   control stops no longer leak into `reasoning_content`; a cut turn reports
   `finish_reason=length` instead of `stop`, and the non-streaming path raises 502 for
-  every control stop, not just `internal_timeout`.
+  every control stop, not just `internal_timeout`. The DOM fallback now propagates its
+  completion flag too (`truncated`), and both transports invalidate the session on a
+  truncating stop.
+- tool turns: the 2s quota-probe sleep no longer runs when a turn carries function
+  calls (it was costing 2s per tool call in an agent loop).
+- DOM "streaming" no longer paces a finished answer at 5 chars/30ms (~18s per 3kB).
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
   and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.

@@ -22,7 +22,7 @@ from models import (
 
 from .common_utils import random_id
 from .sse import generate_sse_chunk, generate_sse_stop_chunk
-from .utils_ext.stream import CONTROL_REASONS, use_stream_response
+from .utils_ext.stream import CONTROL_REASONS, TRUNCATED_REASONS, use_stream_response
 from .utils_ext.tokens import calculate_usage_stats
 
 # Pattern to strip emulated function call text from body content
@@ -346,6 +346,10 @@ async def gen_sse_from_aux_stream(
                     and not has_started_body
                     and not is_recovering
                     and not is_quota_exceeded
+                    # A function-call turn legitimately carries no body text.
+                    # Probing quota and sleeping 2s on it put two seconds in
+                    # front of every tool call in an agent loop.
+                    and not function
                 ):
                     try:
                         from browser_utils.operations import check_quota_limit
@@ -431,6 +435,27 @@ async def gen_sse_from_aux_stream(
                             f"[{req_id}] Stream ended on {stop_reason}; "
                             "reporting finish_reason=length."
                         )
+                        if stop_reason in TRUNCATED_REASONS:
+                            # The page may hold more of this answer than the
+                            # client received, so the transcript in the page is
+                            # no longer the transcript the client will send back.
+                            # Drop the session: the next turn replays into a
+                            # cleared chat instead of submitting a reply the
+                            # model has already seen in full.
+                            try:
+                                from . import chat_sessions
+
+                                key = chat_sessions.active_key()
+                                if key:
+                                    chat_sessions.invalidate(key)
+                                    logger.info(
+                                        f"[{req_id}] [Session] Invalidated after "
+                                        "truncated turn; next request replays."
+                                    )
+                            except Exception as session_err:
+                                logger.debug(
+                                    f"[{req_id}] Session invalidation skipped: {session_err}"
+                                )
                     else:
                         finish_reason = "stop"
                     choice_item = {
@@ -551,6 +576,11 @@ async def gen_sse_from_playwright(
 
         data_receiving = True
         lines = final_content.split("\n")
+        # This path has already waited for the complete answer, so pacing the
+        # replay is pure added latency: 5 characters every 30ms turned a
+        # finished 3k-character response into ~18 extra seconds. Chunking now
+        # exists only to keep each write small.
+        chunk_size = 512
         for line_idx, line in enumerate(lines):
             try:
                 check_client_disconnected(
@@ -561,15 +591,12 @@ async def gen_sse_from_playwright(
                     completion_event.set()
                 break
             if line:
-                chunk_size = 5
                 for i in range(0, len(line), chunk_size):
                     yield generate_sse_chunk(
                         line[i : i + chunk_size], req_id, model_name_for_stream
                     )
-                    await asyncio.sleep(0.03)
             if line_idx < len(lines) - 1:
                 yield generate_sse_chunk("\n", req_id, model_name_for_stream)
-                await asyncio.sleep(0.01)
 
         usage_stats = calculate_usage_stats(
             [msg.model_dump() for msg in request.messages], final_content, ""
@@ -612,7 +639,10 @@ async def gen_sse_from_playwright(
             )
         else:
             yield generate_sse_stop_chunk(
-                req_id, model_name_for_stream, "stop", usage_stats
+                req_id,
+                model_name_for_stream,
+                "length" if response_data.get("truncated") else "stop",
+                usage_stats,
             )
     except (QuotaExceededError, QuotaExceededRetry):
         raise

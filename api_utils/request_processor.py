@@ -652,7 +652,19 @@ async def _handle_playwright_response(
             message_payload = {"role": "assistant", "content": consolidated_content}
             if reasoning_text and body_content:
                 message_payload["reasoning_content"] = reasoning_text
-            finish_reason_val = "stop"
+            if response_data.get("truncated"):
+                # Completion was never confirmed (poll timeout). Reporting
+                # "stop" would present the captured prefix as a whole answer.
+                finish_reason_val = "length"
+                logger.warning(
+                    f"[{req_id}] DOM completion not confirmed; reporting "
+                    "finish_reason=length."
+                )
+                session_key = chat_sessions.active_key()
+                if session_key:
+                    chat_sessions.invalidate(session_key)
+            else:
+                finish_reason_val = "stop"
 
         response_payload = build_chat_completion_response_json(
             req_id,
