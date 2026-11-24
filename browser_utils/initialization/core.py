@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict, Optional, Tuple
 
 from playwright.async_api import (
@@ -44,6 +45,20 @@ async def _wait_for_shutdown():
     """Helper to wait for GlobalState.IS_SHUTTING_DOWN event."""
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, GlobalState.IS_SHUTTING_DOWN.wait)
+
+
+def _stdin_is_tty() -> bool:
+    """Whether an interactive prompt can be answered in this process.
+
+    Headless launches, proot containers and service units have no terminal.
+    Calling `input()` there raises EOFError, which the caller used to report as
+    "Unexpected page initialization error: EOF when reading a line" - a message
+    that names neither the cause nor the fix.
+    """
+    try:
+        return bool(sys.stdin) and bool(sys.stdin.isatty())
+    except Exception:
+        return False
 
 
 async def initialize_page_logic(  # pragma: no cover
@@ -386,12 +401,32 @@ async def initialize_page_logic(  # pragma: no cover
                 ) from new_page_nav_err
 
         if login_url_pattern in current_url:
+            # A prompt is only useful when a human can see the browser and answer
+            # on the same terminal. `debug` is that case; so is `attach` when a
+            # TTY exists (a visible browser on a desktop). Anything else raises:
+            # `input()` with no terminal raises EOFError, which used to surface
+            # as "Unexpected page initialization error: EOF when reading a line".
+            can_prompt = launch_mode == "debug" or (
+                launch_mode == "attach" and _stdin_is_tty()
+            )
             if launch_mode == "headless":
                 logger.error(
                     "Detected redirect to login page in headless mode, authentication may have expired. Please update the auth file."
                 )
                 raise RuntimeError(
                     "Auth failed in headless mode, auth file update required."
+                )
+            if not can_prompt:
+                logger.error(
+                    f"Authentication required in '{launch_mode}' mode, and no "
+                    "interactive prompt is available to complete it."
+                )
+                raise RuntimeError(
+                    f"Authentication required: the browser for '{launch_mode}' mode is "
+                    "on Google's sign-in page and this run cannot ask for input. "
+                    "Sign in once with `launch_camoufox.py --debug` (or in the "
+                    "attached browser profile), then pass --active-auth-json / set "
+                    "ACTIVE_AUTH_JSON_PATH."
                 )
             else:
                 print(f"\n{'=' * 20} Action Required {'=' * 20}", flush=True)

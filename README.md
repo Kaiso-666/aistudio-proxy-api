@@ -122,7 +122,9 @@ The built-in web UI is at `http://127.0.0.1:2048/`.
 
 `launch_camoufox.py` starts a local Camoufox: a glibc Firefox build, which
 Android cannot host. Attach mode inverts the relationship — you run the browser,
-the proxy connects to it:
+the proxy connects to it.
+
+On any host that has Playwright (Linux, macOS, Windows, or Debian inside proot):
 
 ```bash
 # a Chromium on the device (or reachable over the network)
@@ -138,12 +140,48 @@ python launch_camoufox.py --termux \
   --browser-endpoint ws://desktop.local:9222/devtools/browser/<id>
 ```
 
+### On-device setup (Termux + proot Debian)
+
+Native Termux cannot run the proxy: `pip` has no Playwright wheel for bionic
+(`No matching distribution found for playwright` — the driver is a glibc
+binary), and Camoufox is glibc too. A Debian container under `proot-distro` is
+regular Linux, so everything installs and runs there; the repo is visible at
+the same path.
+
 | | standard | termux / attach |
 | --- | --- | --- |
 | browser process | launched by this repo | yours, started beforehand |
 | connector | Playwright `firefox.connect` | `chromium.connect_over_cdp` (`http://` endpoint) or `connect` (`ws://`) |
 | `STREAM_PORT` | `3120` (MITM fast path) | `0` unless you pass `--stream-port` |
 | startup check | requires `camoufox` importable | requires nothing but an endpoint |
+
+```bash
+pkg install proot-distro
+proot-distro install debian
+# once, inside the container: python3, chromium, venv, dependencies
+proot-distro login debian -- bash ~/aistudio-proxy-api/tools/termux/bootstrap-debian.sh
+# every run: starts Chromium on :9222 and the proxy on :2048
+bash tools/termux/start.sh
+```
+
+`bootstrap-debian.sh` forces IPv4 for apt (inside proot, DNS resolves to IPv6
+that has no route, which fails as "Temporary failure resolving deb.debian.org")
+and does **not** run `playwright install`: attach mode needs the driver, not
+Playwright's bundled browsers.
+
+First sign-in, once, without leaving the phone:
+
+```bash
+bash tools/termux/login-on-device.sh
+# VNC on 127.0.0.1:5900 (pkg install tigervnc; vncviewer 127.0.0.1:5900)
+# sign in to Google in the AI Studio window, press Enter here
+# -> cookies saved to auth_profiles/saved/login.json
+bash tools/termux/start.sh --active-auth-json auth_profiles/saved/login.json
+```
+
+The login run needs a terminal: without a TTY the proxy now refuses with
+"Authentication required … pass --active-auth-json" instead of dying on
+`EOF when reading a line`.
 
 What changes and why:
 
@@ -161,10 +199,16 @@ What changes and why:
   `127.0.0.1` on another host is an error with the command to fix it, not a 30 s
   Playwright timeout. `BROWSER_SKIP_PROBE=1` starts anyway.
 
-What it does not do: make Playwright's driver run on Android. If
-`async_playwright().start()` fails on the device, that is the driver, not this
-mode — run the browser and the proxy on a host that can (or inside
-`proot-distro`), and reach it over `BROWSER_WS_ENDPOINT`.
+What it does not do: make Playwright's driver run on Android. Native Termux
+still cannot run the proxy — attach mode removes the local *browser* requirement,
+not the driver. Use the proot container above, or run the proxy on another host
+and point it at a remote browser with `BROWSER_WS_ENDPOINT`.
+
+Verified on this device: `proot-distro install debian` → Python 3.13, Chromium
+156, `chromium.connect_over_cdp` from Playwright 1.62 connects and loads pages,
+and the proxy attaches, creates its context, navigates to AI Studio, and reports
+the auth state. The Google sign-in itself is the one step that needs a human
+(VNC or a copied `login.json`).
 
 ---
 

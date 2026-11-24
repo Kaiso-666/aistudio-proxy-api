@@ -791,3 +791,75 @@ exercised directly (two system messages, developer role, empty assistant
 between turns, catalogue + turn). Separator duplication is checked by string
 comparison, not by eye. The existing test that asserted "System 2 should be
 skipped" was inverted with its rationale, because that assertion was the defect.
+
+---
+
+## 20. The Termux route, actually installed and measured
+
+Attach mode (§18) was reasoned. This is the same claim, run on the device:
+Termux 0.118.3, Android 16, aarch64, 26 GB free.
+
+```
+pkg install proot-distro                 -> proot-distro 5.10.3
+proot-distro install debian              -> debian:latest, 47 MB layer
+  python 3.13.5 · chromium 156.0.8078.108
+  playwright 1.62 connects over CDP: browser 156.0.8078.108, page title "Example Domain"
+  proxy: "Connecting to chromium browser at http://127.0.0.1:9222"
+         "Connected to browser: 156.0.8078.108"
+         "attach mode: using the attached browser's existing session"
+         -> navigates to https://aistudio.google.com/prompts/new_chat
+```
+
+Two things this run proved, and one it could not.
+
+**Proved: native Termux is not viable, and why.** `pip download playwright
+--only-binary=:all:` returns `No matching distribution found`. Playwright ships
+per-platform wheels because it bundles a Node driver built against glibc;
+Termux is bionic. Attach mode removes the *browser* requirement, not the driver,
+so the proxy process must run where the driver runs — proot, or another host.
+This is now in the README instead of being implied.
+
+**Proved: an actual bug, hit immediately.** The first attach run died with
+
+```
+Unexpected page initialization error: EOF when reading a line
+```
+
+`initialize_page_logic` prompts on stdin when it lands on Google's login page,
+and only `LAUNCH_MODE=headless` avoided the prompt. `attach` and
+`virtual_headless` fell into the `input()` branch; with no terminal that raises
+`EOFError`, and with a terminal it blocks the turn forever. Now the prompt is
+only offered where a human can answer it — `debug`, or `attach` with a TTY — and
+anything else fails with the remedy:
+
+```
+Authentication required: the browser for 'attach' mode is on Google's sign-in
+page and this run cannot ask for input. Sign in once with
+`launch_camoufox.py --debug` … then pass --active-auth-json / set
+ACTIVE_AUTH_JSON_PATH.
+```
+
+**Proved: the auth file is loaded in attach mode.** With `--active-auth-json`
+the log shows `attach mode: loading auth file` and `Using storage_state='…'`, so
+a session captured anywhere can be dropped in.
+
+**Not proved: a real conversation.** That needs a Google session, which needs a
+human. `tools/termux/login-on-device.sh` exists for that: Xvfb + headful
+Chromium + x11vnc on 127.0.0.1:5900, sign in over VNC, press Enter, and
+`AUTO_SAVE_AUTH` writes `auth_profiles/saved/<name>.json` for later headless
+runs. Xvfb, Chromium and the VNC listener were verified starting (`x11vnc:
+Listening for VNC connections on TCP port 5900`); the sign-in itself was not,
+and cannot be from here.
+
+Operational notes that cost time and are now in the scripts:
+
+- apt inside proot resolves `deb.debian.org` to IPv6 that has no route, so every
+  download fails as `Temporary failure resolving` *after* printing an IPv4
+  address. `-o Acquire::ForceIPv4=true`.
+- Chromium in the container runs as root: `--no-sandbox`; proot's `/dev/shm` is
+  small: `--disable-dev-shm-usage`.
+- `proot-distro` ≥5 keeps images under `containers/<name>`, not
+  `installed-rootfs/<name>`; the start script checks both.
+- Playwright's own browsers are never installed: attach mode connects to the
+  Chromium the container already has, which is 150 MB not downloaded, and one
+  fewer thing to update.

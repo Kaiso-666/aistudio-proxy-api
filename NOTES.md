@@ -78,6 +78,17 @@ overlappable, correct OpenAI surface, runnable without a browser.
   double separator after the tool catalogue).
   CHECK: shapes exercised directly with stub imports (4 cases); the old
   "System 2 should be skipped" test assertion was inverted with its rationale.
+- Termux route installed on-device: `proot-distro` 5.10.3 + Debian (python 3.13,
+  chromium 156), Playwright 1.62 connects over CDP, the proxy attaches and reaches
+  AI Studio. Native Termux remains impossible (no playwright wheel for bionic).
+- fixed while proving it: `initialize_page_logic` prompted on stdin for any mode
+  except `headless`; `attach`/`virtual_headless` without a TTY died with "EOF when
+  reading a line". The prompt is now limited to `debug` / `attach`+TTY, and the
+  rest raise "Authentication required … pass --active-auth-json".
+  CHECK: reproduced in the container before the fix, and the new message after;
+  `tests/browser_utils/test_initialization.py` covers attach-without-TTY and
+  `_stdin_is_tty`. Scripts: `tools/termux/{bootstrap-debian,run-attached,start,login-on-device}.sh`.
+  Unverified: an actual signed-in turn (needs a human Google login over VNC).
 
 ## Next
 1. One live run with `RPC_CAPTURE_LIMIT=1 TURN_TIMING=1`: the capture decides S1 vs S3,

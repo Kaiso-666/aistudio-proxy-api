@@ -502,6 +502,53 @@ async def test_init_login_headless_fail(
 
 
 @pytest.mark.asyncio
+async def test_init_login_attach_without_tty_fails_clearly(
+    mock_browser, mock_browser_context, mock_page, mock_server_state
+):
+    """Attach mode with no terminal must name the remedy, not raise EOFError.
+
+    `input()` on a container/headless stdin raises "EOF when reading a line",
+    which surfaced as "Unexpected page initialization error" and said nothing
+    about logging in. Under pytest stdin is not a TTY, so this is the same
+    condition an unattended run hits.
+    """
+    with (
+        patch.dict("os.environ", {"LAUNCH_MODE": "attach"}, clear=False),
+        patch(
+            "browser_utils.initialization.core.setup_network_interception_and_scripts",
+            new_callable=AsyncMock,
+        ),
+        patch("browser_utils.initialization.core.setup_debug_listeners"),
+        patch(
+            "browser_utils.initialization.core._stdin_is_tty", return_value=False
+        ),
+    ):
+        mock_browser_context.pages = []
+        mock_browser_context.new_page.return_value = mock_page
+        mock_page.url = "https://accounts.google.com/signin"
+        mock_page.goto = AsyncMock()
+
+        with pytest.raises(RuntimeError) as exc:
+            await _initialize_page_logic(mock_browser)
+
+    message = str(exc.value)
+    assert "Authentication required" in message
+    assert "active-auth-json" in message
+    assert "EOF" not in message
+
+
+def test_stdin_is_tty_false_without_terminal():
+    from browser_utils.initialization.core import _stdin_is_tty
+
+    class NotATty:
+        def isatty(self):
+            return False
+
+    with patch("sys.stdin", NotATty()):
+        assert _stdin_is_tty() is False
+
+
+@pytest.mark.asyncio
 async def test_init_login_interactive_success(
     mock_browser, mock_browser_context, mock_page, mock_expect, mock_server_state
 ):
