@@ -352,6 +352,13 @@ async def use_stream_response(
                         parsed_data.get("done") is True
                         and not has_seen_functions
                         and page
+                        # Only worth probing when the wire gave us no text. A
+                        # text-format tool call would already be inside the
+                        # body (and is parsed from it), so the old
+                        # unconditional first probe was a DOM scan on every
+                        # completed turn - the retry loop below already stops on
+                        # `accumulated_body` for exactly this reason.
+                        and not accumulated_body
                     ):
                         # Retry loop for DOM function call detection - UI elements may not render immediately
                         # Similar to body text retry loop below, but shorter timeout for function calls

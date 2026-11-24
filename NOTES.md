@@ -51,6 +51,11 @@ overlappable, correct OpenAI surface, runnable without a browser.
   cursor (`_response_plain_len`). Chunk extensions, trailer-terminated streams,
   identity (non-gzip) bodies and split multi-byte characters no longer lose the
   response. Regression check: `python3 tools/check_stream_decoder.py`.
+- `CAMOUFOX_HUMANIZE` in `human_input.py` did not reach the launch path (which
+  always humanises); setting it to 0 only added 25-60ms per typed character on
+  top of Camoufox's cadence. Removed; `CAMOUFOX_HUMANIZE_MAX_TIME` is the real knob.
+- the per-turn DOM function-call probe now only runs when the wire produced no body
+  (its retry loop already stopped on that condition).
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
   and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.

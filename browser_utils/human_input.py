@@ -28,8 +28,8 @@ result, so a failure degrades instead of silently corrupting the request.
 Strategy
 --------
 1. ``<= HUMAN_TYPE_MAX_CHARS``  -> real per-character key events.
-   With Camoufox ``humanize`` enabled the browser itself supplies the cadence,
-   including corrections; otherwise a small randomised delay is used.
+   Camoufox supplies the cadence itself (``CAMOUFOX_HUMANIZE_MAX_TIME``); the
+   proxy adds no per-character delay, because that would stack on top of it.
 2. longer text                 -> ``keyboard.insert_text``, which is the same
    primitive a paste/IME commit uses (one ``beforeinput`` with
    ``inputType: insertText``). A human pasting a 20 KB prompt produces this
@@ -68,13 +68,6 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, "").strip() or default)
     except (TypeError, ValueError):
         return default
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on", "y")
 
 
 def _normalise(value: Optional[str]) -> str:
@@ -131,15 +124,19 @@ async def insert_prompt_text(page, locator, text: str, logger=None) -> bool:
     if not expected:
         return True
 
-    humanize = _env_flag("CAMOUFOX_HUMANIZE", True)
     type_limit = _env_int("HUMAN_TYPE_MAX_CHARS", 320)
 
     if len(expected) <= type_limit:
         try:
             # A short beat after focus, like a person deciding what to write.
             await _jitter(0.08, 0.30)
-            delay = 0 if humanize else random.randint(25, 60)
-            await page.keyboard.type(expected, delay=delay)
+            # No artificial per-character delay: Camoufox is launched with
+            # humanize enabled (launch_camoufox.py sets CAMOUFOX_HUMANIZE_MAX_TIME),
+            # so the browser already paces the keystrokes. An earlier version
+            # read a CAMOUFOX_HUMANIZE env flag here, which did not disable that
+            # - setting it to 0 only added 25-60 ms per character on top of the
+            # browser's own cadence, i.e. the flag made the "fast" setting slow.
+            await page.keyboard.type(expected, delay=0)
             if await _read_field(locator) == expected:
                 log(f"[HumanInput] typed {len(expected)} chars with key events")
                 return True

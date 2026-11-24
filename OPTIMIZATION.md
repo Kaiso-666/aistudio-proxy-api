@@ -624,3 +624,58 @@ text for gzip, identity, extensions, trailers, reasoning/body interleaving, a
 function-call frame and a split multi-byte character. It needs no project
 dependencies, which matters because this module is the one the rest of the proxy
 trusts to be lossless.
+
+---
+
+## 17. Status — tenth pass: a config knob that did the opposite, and a DOM probe on every turn
+
+### 17.1 `CAMOUFOX_HUMANIZE=0` made typing slower, and disabled nothing
+
+`human_input.py` read its own `CAMOUFOX_HUMANIZE` flag to choose the per-key
+delay:
+
+```python
+humanize = _env_flag("CAMOUFOX_HUMANIZE", True)
+delay = 0 if humanize else random.randint(25, 60)
+```
+
+But Camoufox's humanisation is configured in `launch_camoufox.py`, which sets
+`"humanize": _env_float("CAMOUFOX_HUMANIZE_MAX_TIME", 0.55)` — a float, always
+on. Nothing in the launch path reads `CAMOUFOX_HUMANIZE`, so setting it to 0
+did **not** turn humanisation off; it only stacked 25-60 ms of our own sleep on
+top of the browser's cadence, for up to 320 characters. `FORK-NOTES.md` prices
+Camoufox typing at ~157 ms/char, so the "fast" setting added seconds per turn
+and the flag's name promised the opposite of its effect.
+
+The knob is gone; `delay=0` is unconditional and the comment names the real one
+(`CAMOUFOX_HUMANIZE_MAX_TIME`). Default behaviour is unchanged — this only
+removes a trap.
+
+Same class as §15.1 and §16: a switch that appears to control something it does
+not reach. Reading where a value is *consumed*, not where it is read, is what
+finds these.
+
+### 17.2 A DOM scan ran on every completed text turn
+
+On the `done` packet, before the final chunk was yielded, the consumer probed
+the page for function calls:
+
+```python
+if done and not has_seen_functions and page:
+    for _ in range(10):
+        dom_functions, dom_text = await detect_function_calls_from_dom(...)
+        if dom_functions: break
+        if accumulated_body: break          # <-- the intent
+        await asyncio.sleep(0.3)
+```
+
+The `break` says the probe is only meaningful when the wire produced no text,
+but the *first* probe ran unconditionally — one DOM parse (and its locator
+round-trips) on the critical path of every completed turn, text or not.
+
+The guard is now on the outer `if`. Nothing is lost: a text-format tool call is
+inside the body and is already parsed from it, and the case the fallback exists
+for (an empty body, where the page may hold an answer or a rendered call) still
+probes, still retries, and still injects `dom_text`.
+
+Cost removed: one DOM parse per turn. Cost added: none.
