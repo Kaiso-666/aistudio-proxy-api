@@ -290,7 +290,7 @@ class ProxyServer:
         request_context = {"request_ts": 0.0}
 
         async def _process_client_data():
-            nonlocal client_buffer, should_sniff
+            nonlocal should_sniff
             try:
                 while True:
                     data = await client_reader.read(8192)
@@ -357,7 +357,7 @@ class ProxyServer:
                 self._safe_close(server_writer)
 
         async def _process_server_data():
-            nonlocal server_buffer, should_sniff
+            nonlocal should_sniff
             try:
                 while True:
                     data = await server_reader.read(8192)
@@ -407,6 +407,7 @@ class ProxyServer:
                                             "done": True,
                                         }
                                         self.queue.put(json.dumps(error_payload))
+                                    server_buffer.clear()
                                 else:
                                     resp = await self.interceptor.process_response(
                                         bytes(body_data), host, "", headers
@@ -417,10 +418,16 @@ class ProxyServer:
                                             "data": resp,
                                         }
                                         self.queue.put(json.dumps(payload))
-                                        if resp.get("done", False):
-                                            self.logger.debug(
-                                                f"[Proxy] Stream complete: body={len(resp.get('body', ''))}"
-                                            )
+                                    if resp.get("done", False):
+                                        self.logger.debug(
+                                            f"[Proxy] Stream complete: body={len(resp.get('body', ''))}"
+                                        )
+                                        # The terminal chunk, not a literal
+                                        # "0\r\n\r\n", is what ends a response:
+                                        # with trailers that literal never
+                                        # appears and the buffer kept growing.
+                                        server_buffer.clear()
+                                        should_sniff = False
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
@@ -430,8 +437,6 @@ class ProxyServer:
                                 )
 
                     client_writer.write(data)
-                    if b"0\r\n\r\n" in server_buffer:
-                        server_buffer.clear()
             except ConnectionResetError:
                 self.logger.debug("Connection reset by peer processing server data.")
             except Exception as e:

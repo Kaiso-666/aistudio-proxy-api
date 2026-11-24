@@ -576,3 +576,51 @@ cleared chat.
 request has taken the page over, and invalidating the active session would
 destroy its successor. It still reports `finish_reason: "length"` to its own
 client, because that client's answer really was cut.
+
+---
+
+## 16. Status — ninth pass: the decoder was re-emitting every prefix on every read
+
+The MITM child receives the response body **cumulatively** and hands the whole
+accumulated body to `process_response` on every read. That function decoded it
+statelessly and then did `self.response_buffer += decoded_str` — so each read
+re-appended the entire plaintext produced so far. Measured with a four-frame
+body fed in six-byte cumulative reads, the client-visible emission was:
+
+```
+The | The | quick | quick | quick brown | quick brown | quick brown fox | The quick brown fox
+```
+
+which is both duplicated and out of order. Everything downstream ("`use_stream_
+response` normalises to a cumulative body, then `last_body_pos` turns it into
+deltas") was compensating for a decoder that never had a cursor. Fixed with one
+field: `_response_plain_len`, the length of the full decoded text already handed
+to the buffer; only `decoded[len:]` is appended. A shorter decode means a new
+response started without `reset_for_new_request`, so the buffer rebases instead
+of emitting a prefix as if it were a continuation.
+
+Three more wire-level failures found by the same harness, each of which was a
+*silent total loss* rather than a degradation:
+
+| case | old behaviour | now |
+| --- | --- | --- |
+| chunk extension `1a;name=value` | `int(...,16)` raises, loop breaks, **every frame of the response is dropped** | extension stripped, chunk decoded |
+| trailers after the terminal chunk (normal gRPC-web: `0\r\n` + `grpc-status: 0\r\n\r\n`) | `done` never true; the finished stream was ended by the 60 s silence detector and reported as a truncation | the zero-length chunk ends the message; trailers are irrelevant |
+| identity (non-gzip) body | `zlib.decompressobj` returns `b""` for input that is not a compressed stream: **the whole answer disappears** and only a timeout reports it | gzip/zlib magic is checked first; anything else passes through as plain text |
+| a multi-byte character split across two reads | `UnicodeDecodeError` returned an empty result for that read *and* left the buffer untouched, so the next cumulative read re-appended the whole prefix | decode with `errors="ignore"`: the dropped tail character reappears in the next (cumulative) decode and the cursor keeps the boundary |
+
+The proxy loop no longer decides a response is over by searching for a literal
+`0\r\n\r\n` in its buffer (which never appears when trailers are present, so the
+buffer grew for the life of the connection). It clears on the interceptor's
+`done`.
+
+Two test expectations encoded the old behaviour and were corrected with reasons
+in place: `done=False` for a body that is not compressed, and `done=False` for a
+lone zero-length chunk. Both were the *defect*, not a specification.
+
+`tools/check_stream_decoder.py` is the standing regression: it stubs the
+module's imports, replays bodies in cumulative one-byte reads, and asserts exact
+text for gzip, identity, extensions, trailers, reasoning/body interleaving, a
+function-call frame and a split multi-byte character. It needs no project
+dependencies, which matters because this module is the one the rest of the proxy
+trusts to be lossless.

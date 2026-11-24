@@ -46,6 +46,11 @@ overlappable, correct OpenAI surface, runnable without a browser.
 - tool turns: the 2s quota-probe sleep no longer runs when a turn carries function
   calls (it was costing 2s per tool call in an agent loop).
 - DOM "streaming" no longer paces a finished answer at 5 chars/30ms (~18s per 3kB).
+- stream decoder: `process_response` re-appended the whole decoded plaintext on every
+  cumulative read, so text was duplicated and reordered; it now keeps a plaintext
+  cursor (`_response_plain_len`). Chunk extensions, trailer-terminated streams,
+  identity (non-gzip) bodies and split multi-byte characters no longer lose the
+  response. Regression check: `python3 tools/check_stream_decoder.py`.
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
   and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.

@@ -281,10 +281,14 @@ class TestHttpInterceptorEdgeCases:
     @pytest.mark.asyncio
     async def test_process_response_handles_invalid_chunking(self, interceptor):
         """
-        Test scenario: process_response handles invalid chunked data gracefully
-        Expected: Returns empty result dict (exceptions are caught internally)
+        Test scenario: body does not look like a compressed stream
+        Expected: treated as an identity (plain) body, no content parsed, and
+        the terminal chunk still reports completion.
+
+        The old expectation was `done=False`, which was the defect: waiting for
+        the literal "0\\r\\n\\r\\n" made every stream with trailers look silent
+        until the 60s timeout fired. The terminal chunk ends the message.
         """
-        # Create data that looks like valid chunked data but decompression will fail
         fake_chunk = b"not compressed data"
         chunked = (
             hex(len(fake_chunk))[2:].encode()
@@ -294,19 +298,17 @@ class TestHttpInterceptorEdgeCases:
             + b"0\r\n\r\n"
         )
 
-        # process_response catches exceptions and returns empty result
         result = await interceptor.process_response(
             chunked, "example.com", "/GenerateContent", {}
         )
-        assert result == {"body": "", "reason": "", "function": [], "done": False}
+        assert result == {"body": "", "reason": "", "function": [], "done": True}
 
     @pytest.mark.asyncio
     async def test_process_response_handles_decompression_error(self, interceptor):
         """
-        Test scenario: handles decompression failure gracefully
-        Expected: Returns empty result dict (exceptions are caught internally)
+        Test scenario: garbage that is not a frame
+        Expected: empty content, completion reported (see test above)
         """
-        # Create valid chunked data but with invalid compressed content
         invalid_compressed = b"not a valid zlib stream"
         chunked = (
             hex(len(invalid_compressed))[2:].encode()
@@ -316,11 +318,10 @@ class TestHttpInterceptorEdgeCases:
             + b"0\r\n\r\n"
         )
 
-        # process_response catches exceptions and returns empty result
         result = await interceptor.process_response(
             chunked, "example.com", "/GenerateContent", {}
         )
-        assert result == {"body": "", "reason": "", "function": [], "done": False}
+        assert result == {"body": "", "reason": "", "function": [], "done": True}
 
     def test_parse_response_with_malformed_json(self, interceptor):
         """
@@ -443,18 +444,20 @@ class TestHttpInterceptorEdgeCases:
 
     def test_decode_chunked_zero_length_chunk_without_final_marker(self):
         """
-        Test scenario: encounter zero-length chunk but no 0\r\n\r\n marker
-        Expected: return chunked_data, is_done=False
+        Test scenario: zero-length chunk, trailer section not yet received
+        Expected: the message body is complete at the zero-length chunk, so
+        done=True even though the final CRLF of the trailer section is missing.
+
+        gRPC-web appends trailers ("grpc-status: 0") after the terminal chunk,
+        so waiting for a literal "0\\r\\n\\r\\n" left a finished stream reported
+        as incomplete and ended by silence detection instead.
         """
-        # 正常的零长度块应该是 0\r\n\r\n
-        # 但这里只有 0\r\n (缺少后续的 \r\n)
         data = b"0\r\n"
 
         decoded, is_done = HttpInterceptor._decode_chunked(data)
 
-        # 应该识别到 length=0, 但没找到 0\r\n\r\n, 所以 is_done=False
         assert decoded == b""
-        assert is_done is False
+        assert is_done is True
 
     def test_decode_chunked_multiple_chunks_with_truncation(self):
         """

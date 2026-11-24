@@ -26,7 +26,12 @@ class HttpInterceptor:
     def __init__(self, log_dir: str = "logs"):
         self.log_dir = log_dir
         self.logger = logging.getLogger("http_interceptor")
-        self.response_buffer = ""  # Persistent buffer for accumulating response data
+        self.response_buffer = ""  # Plain text not yet emitted, per response
+        # Length of the *whole* decoded plaintext already handed to the buffer.
+        # `process_response` is fed the cumulative body of the response, so a
+        # stateless decode re-supplies every prefix on every read; without this
+        # cursor each read would re-emit everything emitted before it.
+        self._response_plain_len = 0
         # Accumulate unique function calls across streaming chunks
         # Key: (function_name, params_hash) - Value: {"name": str, "params": dict}
         self._accumulated_function_calls: dict[tuple[str, str], dict] = {}
@@ -146,6 +151,7 @@ class HttpInterceptor:
         ensure clean state.
         """
         self.response_buffer = ""
+        self._response_plain_len = 0
         self._accumulated_function_calls.clear()
         # A new GenerateContent turn is exactly the boundary of the previous
         # capture: close it before the next one opens.
@@ -219,8 +225,11 @@ class HttpInterceptor:
         path: str,
         headers: Dict[Any, Any],
     ) -> Dict[str, Any]:
-        """
-        Process the response data before sending to the client using persistent buffering
+        """Decode a response body read and return the frames it completed.
+
+        Contract: `response_data` is the body accumulated since the start of
+        this response (which is what the MITM loop holds), and the returned
+        dict carries only frames not returned by an earlier call.
         """
         try:
             # Handle chunked encoding
@@ -228,13 +237,20 @@ class HttpInterceptor:
             # Handle gzip encoding
             decoded_data = self._decompress_zlib_stream(decoded_data)
 
-            # Convert to string and accumulate in persistent buffer
-            try:
-                decoded_str = decoded_data.decode("utf-8")
-                self.response_buffer += decoded_str
-            except UnicodeDecodeError:
-                # Not UTF-8 data, return empty result
-                return {"reason": "", "body": "", "function": [], "done": is_done}
+            # Decode leniently rather than failing the read: a chunk boundary
+            # can split a multi-byte character, and dropping the whole body for
+            # that loses text that the next (cumulative) read supplies in full.
+            decoded_str = decoded_data.decode("utf-8", errors="ignore")
+            if len(decoded_str) < self._response_plain_len:
+                # Shorter than what was already seen: this is a new response and
+                # reset_for_new_request was not called. Rebase instead of
+                # appending a prefix that was never meant to be a continuation.
+                self.response_buffer = ""
+                self._response_plain_len = 0
+            new_text = decoded_str[self._response_plain_len :]
+            self._response_plain_len = len(decoded_str)
+            if new_text:
+                self.response_buffer += new_text
 
             # Try to parse complete JSON objects from the buffer
             result = self.parse_response_from_buffer(is_done)
@@ -642,39 +658,73 @@ class HttpInterceptor:
         return False
 
     @staticmethod
+    def _looks_compressed(data: bytes) -> bool:
+        """gzip magic, or a valid zlib header."""
+        if data[:2] == b"\x1f\x8b":
+            return True
+        # CMF/FLG: deflate method 8, and the 16-bit header divisible by 31.
+        return (
+            len(data) >= 2
+            and data[0] & 0x0F == 8
+            and ((data[0] << 8) | data[1]) % 31 == 0
+        )
+
+    @staticmethod
     def _decompress_zlib_stream(compressed_stream: Union[bytearray, bytes]) -> bytes:
-        decompressor = zlib.decompressobj(wbits=zlib.MAX_WBITS | 32)
-        decompressed = decompressor.decompress(compressed_stream)
-        return decompressed
+        data = bytes(compressed_stream)
+        if not data:
+            return b""
+        if not HttpInterceptor._looks_compressed(data):
+            if len(data) == 1 and data == b"\x1f":
+                # Too short to tell: a gzip body one byte in. Emitting it as
+                # text would put a stray byte in front of the first frame.
+                return b""
+            # Identity encoding. zlib returns b"" for input that is not a
+            # compressed stream, which would drop the whole answer silently and
+            # leave only a timeout to report it.
+            return data
+        try:
+            decompressor = zlib.decompressobj(wbits=zlib.MAX_WBITS | 32)
+            return decompressor.decompress(data)
+        except zlib.error as e:
+            logging.debug(f"zlib decompression failed: {e}")
+            return b""
 
     @staticmethod
     def _decode_chunked(response_body: bytes) -> Tuple[bytes, bool]:
-        chunked_data = bytearray()
-        while True:
-            length_crlf_idx = response_body.find(b"\r\n")
-            if length_crlf_idx == -1:
-                break
+        """Decode chunked transfer encoding, returning (data, complete).
 
-            hex_length = response_body[:length_crlf_idx]
+        Tolerates chunk extensions (`1a;name=value`), accepts trailers after
+        the terminal chunk, and never consumes a chunk whose data has not fully
+        arrived. `complete` means the terminal zero-length chunk was seen.
+        """
+        chunked_data = bytearray()
+        pos = 0
+        total = len(response_body)
+        while True:
+            crlf = response_body.find(b"\r\n", pos)
+            if crlf == -1:
+                break
+            # RFC 9112: chunk-size [ chunk-ext ]
+            size_field = response_body[pos:crlf].split(b";", 1)[0].strip()
             try:
-                length = int(hex_length, 16)
+                length = int(size_field, 16)
             except ValueError as e:
                 logging.error(f"Parsing chunked length failed: {e}")
                 break
-
             if length == 0:
-                length_crlf_idx = response_body.find(b"0\r\n\r\n")
-                if length_crlf_idx != -1:
-                    return bytes(chunked_data), True
-
-            if length + 2 > len(response_body):
+                # Terminal chunk. Trailers may follow it, and their absence of
+                # a literal "0\r\n\r\n" used to leave done=False forever, which
+                # surfaced as a 60s silence timeout on a finished stream.
+                return bytes(chunked_data), True
+            start = crlf + 2
+            end = start + length
+            if end > total:
                 break
-
-            chunked_data.extend(
-                response_body[length_crlf_idx + 2 : length_crlf_idx + 2 + length]
-            )
-            if length_crlf_idx + 2 + length + 2 > len(response_body):
+            chunked_data.extend(response_body[start:end])
+            if end + 2 > total:
+                # Data is complete but its trailing CRLF has not arrived yet;
+                # the next cumulative read re-decodes this chunk in full.
                 break
-
-            response_body = response_body[length_crlf_idx + 2 + length + 2 :]
+            pos = end + 2
         return bytes(chunked_data), False
