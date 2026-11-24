@@ -162,6 +162,23 @@ async def initialize_page_logic(  # pragma: no cover
                 logger.info(
                     "Auth file not provided via environment variable in debug mode. Current browser state will be used."
                 )
+        elif launch_mode == "attach":
+            # Termux/attach mode: the browser belongs to the operator and is
+            # already signed in, so a storage_state file is optional. When one
+            # is supplied it is loaded into the fresh context, which lets an
+            # agent run unauthenticated Chrome with a saved Google session.
+            auth_filepath_from_env = os.environ.get("ACTIVE_AUTH_JSON_PATH")
+            if auth_filepath_from_env and os.path.exists(auth_filepath_from_env):
+                storage_state_path_to_use = auth_filepath_from_env
+                logger.info(
+                    "attach mode: loading auth file "
+                    f"{os.path.basename(auth_filepath_from_env)}"
+                )
+            else:
+                logger.info(
+                    "attach mode: using the attached browser's existing session "
+                    "(no storage_state)"
+                )
         elif launch_mode == "direct_debug_no_browser":
             logger.info(
                 "direct_debug_no_browser mode: storage_state not loaded, no browser operations performed."

@@ -49,6 +49,8 @@ change with the measurements behind it.
   `429` with `Retry-After` instead of a hard failure.
 - **Auth rotation** — profile rotation, periodic cookie refresh, and save on
   shutdown.
+- **Two runtimes** — launch a local Camoufox (standard), or attach to a browser
+  you already run over CDP/WebSocket (Termux and headless-server setups).
 
 ---
 
@@ -62,6 +64,9 @@ change with the measurements behind it.
 | OS | Windows / Linux | either; Windows is what this fork is tested on |
 
 Camoufox downloads its own Firefox build on first launch (~150 MB).
+
+Android/Termux cannot host Camoufox. It runs the API and attaches to a browser
+you provide — see [Termux / attach mode](#termux--attach-mode).
 
 ---
 
@@ -113,6 +118,56 @@ The built-in web UI is at `http://127.0.0.1:2048/`.
 
 ---
 
+## Termux / attach mode
+
+`launch_camoufox.py` starts a local Camoufox: a glibc Firefox build, which
+Android cannot host. Attach mode inverts the relationship — you run the browser,
+the proxy connects to it:
+
+```bash
+# a Chromium on the device (or reachable over the network)
+chromium --headless=new --remote-debugging-port=9222 about:blank &
+
+python launch_camoufox.py --termux --server-port 2048
+```
+
+Or point it at a browser on another machine (Camoufox and Chromium both work):
+
+```bash
+python launch_camoufox.py --termux \
+  --browser-endpoint ws://desktop.local:9222/devtools/browser/<id>
+```
+
+| | standard | termux / attach |
+| --- | --- | --- |
+| browser process | launched by this repo | yours, started beforehand |
+| connector | Playwright `firefox.connect` | `chromium.connect_over_cdp` (`http://` endpoint) or `connect` (`ws://`) |
+| `STREAM_PORT` | `3120` (MITM fast path) | `0` unless you pass `--stream-port` |
+| startup check | requires `camoufox` importable | requires nothing but an endpoint |
+
+What changes and why:
+
+- **No local launch, no Camoufox dependency.** The dependency check is skipped:
+  attaching does not need the package, only Playwright's driver.
+- **The MITM fast path is off by default.** The stream proxy only sees traffic
+  from a browser configured to use it as its proxy, and your browser is not. With
+  `STREAM_PORT=0` the proxy uses the Playwright/DOM path: correct output, but
+  TTFB is the whole generation instead of the first frame. Pass `--stream-port`
+  if you *do* route the browser through it.
+- **`/health` says which mode is live** — `runtime.mode`,
+  `runtime.browser.kind`, `runtime.browser.connected`.
+- **A wrong endpoint fails fast.** `http://` endpoints are probed at
+  `/json/version` before startup, so a wrong port or a browser bound to
+  `127.0.0.1` on another host is an error with the command to fix it, not a 30 s
+  Playwright timeout. `BROWSER_SKIP_PROBE=1` starts anyway.
+
+What it does not do: make Playwright's driver run on Android. If
+`async_playwright().start()` fails on the device, that is the driver, not this
+mode — run the browser and the proxy on a host that can (or inside
+`proot-distro`), and reach it over `BROWSER_WS_ENDPOINT`.
+
+---
+
 ## Client configuration
 
 Any OpenAI-compatible client: base URL `http://127.0.0.1:2048/v1`, and any
@@ -154,6 +209,9 @@ Everything lives in `.env`. The values that matter most:
 | `PORT` | `2048` | API port |
 | `STREAM_PORT` | `3120` | internal stream-proxy port (`0` disables) |
 | `LAUNCH_MODE` | `normal` | `headless` / `normal` / `virtual_headless` |
+| `RUNTIME_MODE` | `standard` | `standard` launches Camoufox; `termux` attaches to an existing browser; `auto` detects Termux |
+| `BROWSER_CDP_ENDPOINT` | empty | Chromium CDP endpoint to attach to (`http://127.0.0.1:9222`) |
+| `BROWSER_WS_ENDPOINT` | empty | Playwright WebSocket endpoint to attach to (Camoufox on another host) |
 | `UNIFIED_PROXY_CONFIG` | empty | upstream HTTP(S) proxy, if any |
 | `AUTO_ROTATE_AUTH_PROFILE` | `true` | rotate saved auth profiles |
 | `AI_STUDIO_FORCE_MODEL` | unset | pin the model actually used; unset / `off` lets each request choose |
@@ -262,6 +320,10 @@ graph TD
 
 A request is serialised by design: one browser, one chat, one lock. Two
 concurrent calls queue behind each other rather than interleaving keystrokes.
+
+In attach mode the `Camoufox` box is a browser you run yourself; the proxy
+reaches it over CDP or WebSocket instead of spawning it (see
+[Termux / attach mode](#termux--attach-mode)).
 
 ---
 

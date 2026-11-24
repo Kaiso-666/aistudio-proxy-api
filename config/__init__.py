@@ -9,6 +9,14 @@ from .global_state import GlobalState
 from .selector_utils import *
 from .selectors import *
 from .settings import *
+from .runtime_mode import (
+    browser_endpoint,
+    browser_kind,
+    is_termux,
+    runtime_mode,
+    runtime_snapshot,
+    runtime_temp_dir,
+)
 from .timeouts import *
 
 # Explicitly export main configuration items (for IDE autocomplete and type checking)
@@ -153,6 +161,13 @@ __all__ = [
     "get_environment_variable",
     "get_boolean_env",
     "get_int_env",
+    # Runtime Mode
+    "runtime_mode",
+    "is_termux",
+    "browser_endpoint",
+    "browser_kind",
+    "runtime_temp_dir",
+    "runtime_snapshot",
     # Global State
     "GlobalState",
 ]

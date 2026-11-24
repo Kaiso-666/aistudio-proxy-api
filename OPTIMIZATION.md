@@ -679,3 +679,54 @@ for (an empty body, where the page may hold an answer or a rendered call) still
 probes, still retries, and still injects `dom_text`.
 
 Cost removed: one DOM parse per turn. Cost added: none.
+
+---
+
+## 18. Termux / attach mode — two runtimes, one code path
+
+Android cannot host Camoufox: it is a glibc Firefox build, and Termux is bionic.
+Until now that made the whole proxy unstartable there, because the launcher
+refuses to run without `camoufox` importable and the server refuses to start
+without an endpoint the launcher captured.
+
+The mode split is deliberately small. `RUNTIME_MODE` selects `standard`
+(unchanged) or `termux`, and the difference is exactly one sentence: **in termux
+mode nothing is launched; the browser is supplied by the operator.**
+
+| concern | standard | termux / attach |
+| --- | --- | --- |
+| browser process | `launch_camoufox.py` spawns it | yours, already running |
+| endpoint source | captured from the child's stdout | `--browser-endpoint`, `BROWSER_CDP_ENDPOINT`, `BROWSER_WS_ENDPOINT` |
+| connector | `firefox.connect(ws)` | `chromium.connect_over_cdp(http)` for Chromium, `firefox.connect(ws)` otherwise |
+| launcher check | requires `camoufox` importable | skipped |
+| `LAUNCH_MODE` | `headless` / `debug` / `virtual_headless` | `attach` (auth file optional) |
+| `STREAM_PORT` | `3120` | `0` unless passed explicitly |
+
+Design decisions worth stating:
+
+- **Not auto-detected by default.** `RUNTIME_MODE=auto` opts into Termux
+  detection (`TERMUX_VERSION`, `$PREFIX`, interpreter path). Auto-detection by
+  default would make behaviour depend on the host running the tests and would
+  turn a `pip install` on a phone into a different program.
+- **Refuse to start with no endpoint.** The alternative — boot, then answer 503 —
+  hides the one fact the operator needs. The launcher probes `http://`
+  endpoints at `/json/version` and prints the exact command to start a browser,
+  so the failure is one line instead of a 30 s Playwright timeout.
+- **`STREAM_PORT=0` by default in attach mode.** The MITM stream proxy is the
+  fast path, and it only sees traffic from a browser configured to use it as a
+  proxy. An attached browser is not, so the aux-stream reader would block on a
+  queue nobody feeds and report silence. DOM transport is slower (TTFB = full
+  generation) but correct; `--stream-port` is the opt-in for the routed case.
+- **`LAUNCH_MODE=attach` is a distinct value, not `debug`.** `debug` implies
+  interactive login and suppresses model-list logging; an attached browser is
+  already signed in and needs neither.
+
+What this does not do: make Playwright's driver run on Android. That driver is a
+prebuilt binary too. If it cannot run on the device, attach mode still works —
+run the browser on a host that can and reach it with `BROWSER_WS_ENDPOINT`.
+
+Verification (static, no browser attached): mode matrix over 11 env
+combinations, endpoint precedence, scheme-based connector selection with
+`BROWSER_KIND` overrides, temp-dir fallback, and the `/json/version` probe
+against both a stub server and a closed port. The CDP connect path itself is
+unverified here, as is any real attached browser.

@@ -5,6 +5,7 @@ from fastapi import Depends
 from fastapi.responses import JSONResponse
 
 from config import get_environment_variable
+from config.runtime_mode import runtime_snapshot
 
 from ..dependencies import get_request_queue, get_server_state, get_worker_task
 
@@ -46,6 +47,12 @@ async def health_check(
     if not is_worker_running:
         status_message_parts.append("Worker not running")
 
+    # standard = local Camoufox launched by the launcher; termux = attached to
+    # an operator-provided browser over CDP/WebSocket. `browser.connected`
+    # separates "configured but unreachable" from "not configured at all".
+    runtime = runtime_snapshot()
+    runtime["browser"]["connected"] = bool(server_state["is_browser_connected"])
+
     status = {
         "status": status_val,
         "message": "",
@@ -55,6 +62,7 @@ async def health_check(
             "queueLength": q_size,
             "launchMode": launch_mode,
             "browserAndPageCritical": browser_page_critical,
+            "runtime": runtime,
             # Whether the loaded chat is actually being reused is the single
             # number that explains an agent loop's token burn. Silently falling
             # back to full replay is otherwise invisible from the client side.

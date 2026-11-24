@@ -144,14 +144,50 @@ async def _initialize_browser_and_page():
     ws_endpoint = get_environment_variable("CAMOUFOX_WS_ENDPOINT")
     launch_mode = get_environment_variable("LAUNCH_MODE", "unknown")
 
+    # Standard mode: the launcher started Camoufox and exported its endpoint.
+    # Termux/attach mode: there is no local browser process; the endpoint is the
+    # operator's Chromium (CDP) or a Camoufox on another host.
+    from config.runtime_mode import (
+        browser_endpoint,
+        browser_kind,
+        runtime_mode,
+    )
+
+    if not ws_endpoint:
+        ws_endpoint = browser_endpoint()
+    mode = runtime_mode()
+
     if not ws_endpoint and launch_mode != "direct_debug_no_browser":
+        if mode == "termux":
+            # Same refusal as standard mode, with the knob that is actually
+            # missing: an attached deployment must name its browser.
+            raise ValueError(
+                "Attach mode has no browser endpoint. Set BROWSER_CDP_ENDPOINT "
+                "(http://127.0.0.1:9222) or BROWSER_WS_ENDPOINT, or start the "
+                "browser with --remote-debugging-port and point at it."
+            )
         raise ValueError("CAMOUFOX_WS_ENDPOINT environment variable is missing.")
 
     if ws_endpoint:
-        state.logger.info(f"Connecting to browser at: {ws_endpoint}")
-        state.browser_instance = await state.playwright_manager.firefox.connect(
-            ws_endpoint, timeout=30000
-        )
+        kind = browser_kind(ws_endpoint)
+        state.browser_kind = kind
+        state.browser_endpoint = ws_endpoint
+        state.logger.info(f"Connecting to {kind} browser at: {ws_endpoint}")
+        if kind == "chromium":
+            if ws_endpoint.startswith(("ws://", "wss://")):
+                state.browser_instance = await state.playwright_manager.chromium.connect(
+                    ws_endpoint, timeout=30000
+                )
+            else:
+                state.browser_instance = (
+                    await state.playwright_manager.chromium.connect_over_cdp(
+                        ws_endpoint, timeout=30000
+                    )
+                )
+        else:
+            state.browser_instance = await state.playwright_manager.firefox.connect(
+                ws_endpoint, timeout=30000
+            )
         state.is_browser_connected = True
         state.logger.info(f"Connected to browser: {state.browser_instance.version}")
 

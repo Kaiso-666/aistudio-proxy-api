@@ -59,6 +59,19 @@ overlappable, correct OpenAI surface, runnable without a browser.
 - `CHECK: python3 -m py_compile` on all edited modules → pass; fingerprint, validator
   and turn_timing behaviour exercised directly as pure functions (4 + 8 + 8 cases);
   `pyflakes` over non-test code → no undefined names/unused imports/redefinitions.
+- `RUNTIME_MODE` (default `standard`): `termux` = attach mode, no local Camoufox.
+  `launch_camoufox.py --termux [--browser-endpoint http://127.0.0.1:9222]` selects it
+  for one run; `auto` opts into Termux detection. `config/runtime_mode.py` resolves the
+  mode, the endpoint (`BROWSER_CDP_ENDPOINT` / `BROWSER_WS_ENDPOINT` /
+  `CAMOUFOX_WS_ENDPOINT`) and the connector (`chromium.connect_over_cdp` for http
+  endpoints, `firefox.connect` otherwise). Attach mode defaults `STREAM_PORT=0` (the
+  MITM only sees a browser routed through it), probes `/json/version` before startup,
+  and reports itself in `/health` as `runtime.mode` / `runtime.browser.*`.
+  CHECK: `python3 -c "import config.runtime_mode"`; mode/endpoint/kind matrix exercised
+  directly (11 cases); `/json/version` probe exercised against a stub server and a
+  closed port; `tests/config/test_runtime_mode.py` for the suite.
+  Unverified: no real browser was attached — the CDP connect path and the attach
+  launch both need a live Chromium.
 
 ## Next
 1. One live run with `RPC_CAPTURE_LIMIT=1 TURN_TIMING=1`: the capture decides S1 vs S3,

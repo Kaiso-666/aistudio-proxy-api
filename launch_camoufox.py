@@ -1117,6 +1117,25 @@ if __name__ == "__main__":
         action="store_true",
         help="Start headless mode with virtual display (Xvfb, Linux only)",
     )  # from dev
+    parser.add_argument(
+        "--termux",
+        action="store_true",
+        help=(
+            "Termux/attach mode: do not launch a local Camoufox. Connect to the "
+            "browser at --browser-endpoint / BROWSER_CDP_ENDPOINT / "
+            "BROWSER_WS_ENDPOINT instead. Also selected by RUNTIME_MODE=termux."
+        ),
+    )
+    parser.add_argument(
+        "--browser-endpoint",
+        type=str,
+        default=None,
+        help=(
+            "Browser to attach to in --termux mode. http://host:port uses CDP "
+            "(Chromium/Chrome); ws://... uses the Playwright WebSocket protocol "
+            "(Camoufox/Firefox unless BROWSER_KIND=chromium)."
+        ),
+    )
 
     # --camoufox-os argument removed, will be auto-detected and set by script
     parser.add_argument(  # from dev
@@ -1314,6 +1333,23 @@ if __name__ == "__main__":
     logger.info("🚀 Camoufox Launcher Started 🚀")
     logger.info("=================================================")
     ensure_auth_dirs_exist()
+
+    # --- Termux / attach mode ------------------------------------------------
+    # Decided before check_dependencies(): attach mode has no local Camoufox, so
+    # the launcher's "camoufox importable" check is not a precondition here.
+    from config.runtime_mode import is_termux, runtime_mode
+
+    if getattr(args, "termux", False) or runtime_mode() == "termux":
+        from api_utils.attached import run_attached
+
+        logger.info("🔗 Termux/attach mode selected (no local browser launch).")
+        if runtime_mode() == "termux" and is_termux():
+            logger.info(
+                "   Termux environment detected; RUNTIME_MODE=standard restores "
+                "a local Camoufox launch."
+            )
+        sys.exit(run_attached(args, logger))
+
     check_dependencies()
     logger.info("=================================================")
 

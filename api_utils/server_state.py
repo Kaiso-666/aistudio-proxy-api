@@ -59,6 +59,11 @@ class ServerState:
         self.is_browser_connected: bool = False
         self.is_page_ready: bool = False
         self.is_initializing: bool = False
+        # Which connector was used, and where it pointed. Reported by /health:
+        # "firefox" is a Camoufox started by the launcher, "chromium" is an
+        # external browser attached over CDP.
+        self.browser_kind: str = "firefox"
+        self.browser_endpoint: str = ""
 
         # --- Proxy Configuration ---
         self.PLAYWRIGHT_PROXY_SETTINGS: Optional[Dict[str, str]] = None
