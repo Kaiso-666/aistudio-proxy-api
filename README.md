@@ -33,8 +33,10 @@ change with the measurements behind it.
 
 - **OpenAI-compatible surface** — `/v1/chat/completions` (streaming and
   non-streaming), `/v1/models`, `/health`.
-- **Always the newest Flash** — the client's `model` field is advisory; the
-  proxy pins `AI_STUDIO_FORCE_MODEL` so no stale name reaches the UI.
+- **Model pinning** — set `AI_STUDIO_FORCE_MODEL` and the client's `model` field
+  becomes advisory, so no stale or gated name reaches the UI. Unset, each request
+  chooses its own model, and an unknown name is rejected with the available list
+  instead of being silently swapped.
 - **Persistent chat sessions** — the AI Studio chat stays loaded between turns,
   and only the new tail is submitted when the stored transcript is a strict
   prefix of the incoming history.
@@ -154,14 +156,14 @@ Everything lives in `.env`. The values that matter most:
 | `LAUNCH_MODE` | `normal` | `headless` / `normal` / `virtual_headless` |
 | `UNIFIED_PROXY_CONFIG` | empty | upstream HTTP(S) proxy, if any |
 | `AUTO_ROTATE_AUTH_PROFILE` | `true` | rotate saved auth profiles |
-| `AI_STUDIO_FORCE_MODEL` | `gemini-3.8-flash` | the model actually used, whatever the client asks for |
+| `AI_STUDIO_FORCE_MODEL` | unset | pin the model actually used; unset / `off` lets each request choose |
 | `AI_STUDIO_MODEL_FALLBACKS` | empty | comma-separated fallbacks if the pinned model is unavailable |
 | `DEFAULT_THINKING_LEVEL_FLASH` | `high` | `low` / `medium` / `high` — drives token spend |
 | `DEFAULT_THINKING_LEVEL_PRO` | `high` | same, for Pro models |
 | `FUNCTION_CALLING_MODE` | `auto` | `auto` (native + fallback) / `native` / `emulated` |
 | `FUNCTION_CALLING_CACHE_ENABLED` | `true` | skip redundant tool-panel automation |
 | `SESSION_CONTEXT_LIMIT_TOKENS` | `900000` | rotate the chat above this size |
-| `HUMAN_TYPE_MAX_CHARS` | `40` | longer prompts are inserted, not typed |
+| `HUMAN_TYPE_MAX_CHARS` | `320` | longer prompts are inserted instead of typed |
 | `CAMOUFOX_HUMANIZE_MAX_TIME` | `0.55` | cap on synthetic pointer travel per click |
 | `STREAM_INTERSTREAM_DELAY_S` | `0` | gap forced between back-to-back streaming turns (`0` = none) |
 | `MAX_QUEUE_DEPTH` | `3` | reject with `429` + `Retry-After` past this queue depth (`0` disables) |
@@ -216,13 +218,15 @@ that is reasoned but not yet measured is kept separate, in
 | Area | Upstream | This fork |
 | --- | --- | --- |
 | Request latency | ~52 s | ~22 s (cached settings probe, capped humanize, bounded typing) |
-| `model` field | used verbatim, can hit gated/broken names | pinned to the newest Flash; client value is advisory |
+| `model` field | used verbatim, can hit gated/broken names | pinnable via `AI_STUDIO_FORCE_MODEL`; unknown names are `400` with the available list |
 | Long sessions | full transcript re-uploaded every turn | stored prefix ⇒ delta submit only |
 | Context limit | none | rotation with summarised `[CONTEXT HANDOFF]` |
 | Tool calls | could be fabricated locally with `{}` args | only model-issued calls; empty-argument calls are trapped and the DOM dumped |
 | Tool results | sometimes re-triggered the same call | replayed into a fresh chat so the model consumes the result |
 | Upstream 403 | surfaced as failure | `429` + `Retry-After` |
 | New-chat click | could hang on its own confirmation dialog → 502 | dialog-safe path with URL navigation fallback |
+| Stream cut by a timeout | reported `finish_reason: "stop"` | `"length"`, session invalidated, `502` when non-streaming |
+| `response_format` | accepted, echoed back, ignored | translated into a prompt instruction; non-streaming JSON fences unwrapped |
 
 ---
 
@@ -274,17 +278,35 @@ concurrent calls queue behind each other rather than interleaving keystrokes.
   mid-run, delete `%TEMP%\camoufox\parent.lock` before the next start, otherwise
   Camoufox waits out its handshake timeout and dies with
   `Failed to capture WebSocket endpoint`.
-- **`FUNCTION_CALLING_MODE=emulated` does not work with current models** — the
-  model answers in prose without emitting a call. Keep `auto`.
+- **A turn cut by the transport is not reported as a complete answer.** Silence,
+  TTFB and hard timeouts, and a zombie takeover, all end a turn early. The final
+  chunk then says `finish_reason: "length"` (non-streaming returns `502`), the
+  internal status token never leaks into `reasoning_content`, and the chat session
+  is invalidated so the next turn replays instead of submitting a transcript the
+  page already holds in full. `zombie_stream_aborted` reports `length` but keeps
+  the session: the page already belongs to a successor request.
+- **`emulated` function calling does not work with current models** — the model
+  answers in prose without emitting a call. Keep `auto`.
 
 ---
 
 ## Development
 
 ```bash
-ruff check .
-pytest
+poetry run ruff check .
+poetry run pyright
+poetry run pytest                      # needs the project venv
+python3 tools/check_stream_decoder.py  # wire decoder, stdlib only
 ```
+
+`tools/check_stream_decoder.py` replays gzip/chunked response bodies in
+cumulative one-byte reads and asserts exact text — run it after any change under
+`stream/`, where a frame-boundary regression is otherwise invisible until a
+client reports a cut answer. `tools/inspect_rpc_capture.py` decodes captured
+`GenerateContent` request bodies (`RPC_CAPTURE_LIMIT`) offline.
+
+Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md) — which checks gate a change,
+and why measured and reasoned work are kept in separate files.
 
 Frontend:
 

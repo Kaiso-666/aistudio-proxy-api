@@ -1,23 +1,31 @@
-# 文档总览
+# Documentation
 
-本目录文档以当前代码实现为准，重点覆盖：上手、部署、配置、运维与开发。
+These documents describe the current implementation: getting started,
+deployment, configuration, operations and development.
 
-## 文档索引
+The fork's own notes are in English at the repository root
+([`README.md`](../README.md), [`FORK-NOTES.md`](../FORK-NOTES.md),
+[`OPTIMIZATION.md`](../OPTIMIZATION.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md)).
+The pages below are inherited from upstream and remain in Chinese; they are still
+accurate for the shared settings, but where they disagree with the fork's README,
+the README wins.
 
-- [快速开始](quick-start.md)
-- [部署与运维指南](deployment-and-operations.md)
-- [配置参考](configuration-reference.md)
-- [API 使用说明](api-usage.md)
-- [函数调用模式](function-calling.md)
-- [认证轮转与 Cookie 刷新](auth-rotation-cookie-refresh.md)
-- [排障指南](troubleshooting.md)
-- [开发、测试与发布](development-and-release.md)
-- [旧文档迁移说明](migration-notes.md)
+## Index
 
-## 适用范围
+- [Quick start](quick-start.md) — 快速开始
+- [Deployment and operations](deployment-and-operations.md) — 部署与运维指南
+- [Configuration reference](configuration-reference.md) — 配置参考
+- [API usage](api-usage.md) — API 使用说明
+- [Function calling modes](function-calling.md) — 函数调用模式
+- [Auth rotation and cookie refresh](auth-rotation-cookie-refresh.md) — 认证轮转与 Cookie 刷新
+- [Troubleshooting](troubleshooting.md) — 排障指南
+- [Development, testing and release](development-and-release.md) — 开发、测试与发布
+- [Migration notes](migration-notes.md) — 旧文档迁移说明
 
-- 后端服务：`api_utils/`、`stream/`
-- 浏览器自动化：`browser_utils/`
-- 配置：`config/` 与 `.env`
-- 启动器：`launch_camoufox.py`、`gui/`
-- Docker：`docker/`
+## Scope
+
+- backend service: `api_utils/`, `stream/`
+- browser automation: `browser_utils/`
+- configuration: `config/` and `.env`
+- launcher: `launch_camoufox.py`, `gui/`
+- Docker: `docker/`
