@@ -730,3 +730,64 @@ combinations, endpoint precedence, scheme-based connector selection with
 `BROWSER_KIND` overrides, temp-dir fallback, and the `/json/version` probe
 against both a stub server and a closed port. The CDP connect path itself is
 unverified here, as is any real attached browser.
+
+---
+
+## 19. Status — eleventh pass: the prompt was dropping instructions
+
+Three defects in `prepare_combined_prompt`, all silent, all on the path every
+request takes.
+
+### 19.1 Only the first system message survived
+
+```python
+for i, msg in enumerate(messages):
+    if msg.role == "system":
+        ...
+        break          # <- everything after the first was discarded
+```
+
+A harness that appends a system reminder mid-session — "never touch this file",
+"the answer must be JSON", a tool-availability update — had it dropped with no
+signal in the response and nothing in the logs above DEBUG. Confirmed before the
+change:
+
+```
+[system "S1: you are a coding agent", system "S2: never delete files", user "hi"]
+-> 'System Instructions:\nS1: you are a coding agent\n---\nUser:\nhi\n'
+```
+
+Now every system message is hoisted into the instruction block, in order,
+joined by a blank line. Positional hoisting matches the previous behaviour
+first system messages already had, so no client sees a reordering it did not
+already have.
+
+### 19.2 `developer` was an ordinary turn
+
+`developer` is OpenAI's newer name for the `system` role (`o1`+, and current
+SDKs). It was rendered as a normal turn — `Developer:\n...` *below* the user
+text — which both weakens its authority and, in a long conversation, buries it.
+Treated as a system message now, and `validate_chat_request` counts it as one
+(a request containing only system/developer messages is rejected instead of
+producing a prompt with no instruction-following content).
+
+### 19.3 Separators were emitted for messages that render nothing
+
+`combined_parts.append(turn_separator)` ran before the decision to render the
+message, so an empty assistant message (common: a client echoing an empty turn,
+or a tool-call turn whose text is empty) left:
+
+```
+User:\none\n---\n\n---\nUser:\ntwo\n
+```
+
+and the tool catalogue — which already ends with its own separator — got a
+second one on every request that declares tools, i.e. every agent turn. The
+separator now attaches to a turn that is actually emitted, and only when the
+previous block does not already end with one.
+
+Verification: the module was loaded with stubbed imports and the four shapes
+exercised directly (two system messages, developer role, empty assistant
+between turns, catalogue + turn). Separator duplication is checked by string
+comparison, not by eye. The existing test that asserted "System 2 should be
+skipped" was inverted with its rationale, because that assertion was the defect.

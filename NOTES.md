@@ -72,6 +72,12 @@ overlappable, correct OpenAI surface, runnable without a browser.
   closed port; `tests/config/test_runtime_mode.py` for the suite.
   Unverified: no real browser was attached — the CDP connect path and the attach
   launch both need a live Chromium.
+- prompt assembly: every system/developer message is kept (only the first used to
+  survive a `break`), `developer` is treated as a system role, and `---` separators
+  are only emitted for turns that actually render (no more `---\n\n---`, and no
+  double separator after the tool catalogue).
+  CHECK: shapes exercised directly with stub imports (4 cases); the old
+  "System 2 should be skipped" test assertion was inverted with its rationale.
 
 ## Next
 1. One live run with `RPC_CAPTURE_LIMIT=1 TURN_TIMING=1`: the capture decides S1 vs S3,

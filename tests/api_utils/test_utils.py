@@ -335,7 +335,12 @@ def test_prepare_combined_prompt_local_files(mock_file_utils, mock_logger):
 
 
 def test_prepare_combined_prompt_system_message_ordering(mock_logger):
-    """Test that system messages are processed and placed correctly."""
+    """System messages are hoisted, in order, and none is dropped.
+
+    The previous behaviour kept only the first system message and silently
+    discarded the rest. A harness that appends a system reminder mid-session
+    ("never touch this file") therefore lost it, with no signal to the client.
+    """
     messages = [
         Message(role="user", content="User 1"),
         Message(role="system", content="System 1"),
@@ -344,16 +349,13 @@ def test_prepare_combined_prompt_system_message_ordering(mock_logger):
     ]
     prompt, _ = prepare_combined_prompt(messages, "req1")
 
-    # Based on utils.py:
-    # 1. Finds first system message ("System 1") and uses it.
-    # 2. Skips subsequent system messages ("System 2").
-
     assert "User:\nUser 1" in prompt
     assert "System Instructions:\nSystem 1" in prompt
     assert "Assistant:\nAssistant 1" in prompt
 
-    # System 2 should be skipped
-    assert "System 2" not in prompt
+    # Every system message survives, in the order the client sent them.
+    assert "System 2" in prompt
+    assert prompt.find("System Instructions:\nSystem 1") < prompt.find("System 2")
 
     # Check ordering
     # System prompt is prepended to the first message usually or handled separately

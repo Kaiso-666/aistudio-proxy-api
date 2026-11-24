@@ -72,7 +72,6 @@ def prepare_combined_prompt(
     # to avoid "file not found" errors caused by loss of historical attachments.
 
     combined_parts: List[str] = []
-    system_prompt_content: Optional[str] = None
     processed_system_message_indices: Set[int] = set()
     files_list: List[
         str
@@ -150,23 +149,28 @@ def prepare_combined_prompt(
             except Exception:
                 pass
 
-    # Process system messages
+    # Process system messages. Every one of them, in order: only the first used
+    # to be kept and the rest were dropped silently, so a harness that appends a
+    # system reminder ("do not touch this file") lost it with no signal at all.
+    # "developer" is OpenAI's newer name for the same role and is treated the
+    # same way - it used to render as an ordinary turn, below the user text.
+    system_blocks: List[str] = []
     for i, msg in enumerate(messages):
-        if msg.role == "system":
-            content = msg.content
-            if isinstance(content, str) and content.strip():
-                system_prompt_content = content.strip()
-                processed_system_message_indices.add(i)
-                _has_system_prompt = True
-                logger.debug(
-                    f"Found system prompt at index {i}: {system_prompt_content[:80]}..."
-                )
-                system_instr_prefix = "System Instructions:\n"
-                combined_parts.append(f"{system_instr_prefix}{system_prompt_content}")
-            else:
-                logger.debug(f"Ignoring empty system message at index {i}")
-                processed_system_message_indices.add(i)
-            break
+        if msg.role not in ("system", "developer"):
+            continue
+        processed_system_message_indices.add(i)
+        content = msg.content
+        if isinstance(content, str) and content.strip():
+            system_blocks.append(content.strip())
+            _has_system_prompt = True
+            logger.debug(f"Found system prompt at index {i}: {content.strip()[:80]}...")
+        else:
+            logger.debug(f"Ignoring empty system message at index {i}")
+
+    if system_blocks:
+        combined_parts.append(
+            "System Instructions:\n" + "\n\n".join(system_blocks)
+        )
 
     role_map_ui = {
         "user": "User",
@@ -181,12 +185,9 @@ def prepare_combined_prompt(
         if i in processed_system_message_indices:
             continue
 
-        if msg.role == "system":
-            logger.debug(f"Skipping subsequent system message at index {i}")
+        if msg.role in ("system", "developer"):
+            # Hoisted into the instruction block above, not repeated here.
             continue
-
-        if combined_parts:
-            combined_parts.append(turn_separator)
 
         role = msg.role or "unknown"
         role_prefix_ui = f"{role_map_ui.get(role, role.capitalize())}:\n"
@@ -645,14 +646,17 @@ def prepare_combined_prompt(
                 current_turn_parts.append("\n".join(tool_result_lines))
 
         if len(current_turn_parts) > 1 or (role == "assistant" and tool_calls):
+            # Separator only before a turn that actually renders. Appending it
+            # unconditionally left "---\n\n---" in the prompt wherever a message
+            # contributed nothing, and doubled it after the tool catalogue,
+            # which already ends with one.
+            if combined_parts and not combined_parts[-1].endswith(turn_separator):
+                combined_parts.append(turn_separator)
             combined_parts.append("".join(current_turn_parts))
-        elif not combined_parts and not current_turn_parts:
+        else:
             logger.debug(
-                f"(Prepare Prompt) Skipping empty message for role {role} at index {i} (and no tool calls)."
-            )
-        elif len(current_turn_parts) == 1 and not combined_parts:
-            logger.debug(
-                f"(Prepare Prompt) Skipping empty message for role {role} at index {i} (prefix only)."
+                f"(Prepare Prompt) Skipping message with no renderable content "
+                f"for role {role} at index {i}."
             )
 
     final_prompt = "".join(combined_parts)

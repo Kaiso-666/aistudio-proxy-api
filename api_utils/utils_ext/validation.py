@@ -11,7 +11,7 @@ def validate_chat_request(
             f"[{req_id}] Invalid request: 'messages' array is missing or empty."
         )
 
-    if not any(msg.role != "system" for msg in messages):
+    if not any(msg.role not in ("system", "developer") for msg in messages):
         raise ValueError(
             f"[{req_id}] Invalid request: All messages are system messages. At least one user or assistant message is required."
         )
